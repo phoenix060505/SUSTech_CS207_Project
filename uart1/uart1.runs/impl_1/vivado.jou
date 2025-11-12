@@ -1,0 +1,12 @@
+#-----------------------------------------------------------
+# Vivado v2017.4 (64-bit)
+# SW Build 2086221 on Fri Dec 15 20:55:39 MST 2017
+# IP Build 2085800 on Fri Dec 15 22:25:07 MST 2017
+# Start of session at: Sun Nov  9 17:28:46 2025
+# Process ID: 10588
+# Current directory: D:/Vivado_Work/project2025/uart1/uart1.runs/impl_1
+# Command line: vivado.exe -log uart_loopback.vdi -applog -product Vivado -messageDb vivado.pb -mode batch -source uart_loopback.tcl -notrace
+# Log file: D:/Vivado_Work/project2025/uart1/uart1.runs/impl_1/uart_loopback.vdi
+# Journal file: D:/Vivado_Work/project2025/uart1/uart1.runs/impl_1\vivado.jou
+#-----------------------------------------------------------
+source uart_loopback.tcl -notrace
