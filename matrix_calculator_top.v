@@ -34,6 +34,8 @@ wire display_done;                  // 展示完成信号（简化假设1）
 wire operand_legal;                 // 运算数合法信号（从检查逻辑）
 wire compute_done;                  // 计算完成信号（从运算模块）
 wire timeout_expired;               // 超时到期信号（cnt==0）
+wire rst_n = ~rst;
+wire tx_busy;
 
 reg [ELEM_WIDTH-1:0] matrix_store[MAX_STORE-1:0][MAX_DIM-1:0][MAX_DIM-1:0]; // 矩阵存储数组（reg实现，覆盖逻辑FIFO）
 reg [3:0] m, n;                     // 当前处理的矩阵维度
@@ -62,18 +64,21 @@ fsm_controller fsm_inst (           // FSM核心控制器
     .start_compute(start_compute)
 );
 
-uart_rx uart_rx_inst (              // UART接收模块：解析串口数据
+uart_rx #(.CLK_FREQ(100_000_000), .BAUD_RATE(115200)) uart_rx_inst (
     .clk(clk),
+    .rst_n(rst_n),
     .rx(uart_rx),
-    .data_out(uart_data_out),       // 输出接收字节
-    .valid(uart_valid)              // 数据有效
+    .rx_data(uart_data_out),
+    .rx_done(uart_valid)
 );
 
-uart_tx uart_tx_inst (              // UART发送模块：格式化输出矩阵/结果
+uart_tx #(.CLK_FREQ(100_000_000), .BAUD_RATE(115200)) uart_tx_inst (
     .clk(clk),
-    .data_in(/*从顶层路由*/),
-    .start(/*从FSM或完成信号*/),
-    .tx(uart_tx)
+    .rst_n(rst_n),
+    .tx_start(uart_start),
+    .tx_data(uart_data_in),
+    .tx(uart_tx),
+    .tx_busy(tx_busy)
 );
 
 matrix_storage matrix_store_inst (  // 矩阵存储模块：支持输入/生成写入，覆盖旧矩阵
