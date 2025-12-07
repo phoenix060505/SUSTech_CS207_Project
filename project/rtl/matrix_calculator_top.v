@@ -1,134 +1,131 @@
 `timescale 1ns / 1ps
-// Top Module: Matrix Calculator System Integration
-// Includes FSM control, data storage, computation units, and IO interface drivers
+
 module matrix_calculator_top #(
-    parameter MAX_DIM = 5,           // Max matrix dimension
-    parameter MAX_STORE = 2,         // Max storage per dimension
-    parameter ELEM_WIDTH = 8,        // Element width
-    parameter TIMEOUT_DEFAULT = 10,  // Default timeout (seconds)
-    parameter CLK_FREQ = 100_000_000 // System clock frequency
+    parameter MAX_DIM = 5,
+    parameter MAX_STORE = 2,
+    parameter ELEM_WIDTH = 8,
+    parameter TIMEOUT_DEFAULT = 10,
+    parameter CLK_FREQ = 100_000_000
 ) (
     input wire clk,
-    input wire rst,                  // Active high reset
-    input wire [7:0] sw,             // sw[7:4] reserved, sw[3:0] reused: Matrix Index/Scalar/Config
-    input wire [3:0] btn,            // btn[0]: Confirm/Start
-    input wire uart_rx,              // UART RX
-    output reg [7:0] led,            // led[0]: Error, led[1]: Busy, Others: Status
-    output reg [7:0] seg,            // 7-segment segment selection (Common Anode)
-    output reg [3:0] an,             // 7-segment digit selection
-    output wire uart_tx              // UART TX
+    input wire rst,          // BTN_DOWN
+    input wire [7:0] sw,
+    input wire [3:0] btn,
+    input wire uart_rx,
+    output reg [7:0] led,
+    output reg [7:0] seg,
+    output reg [7:0] an,     // 8位位宽
+    output wire uart_tx
 );
 
     //==============================================================
-    // 1. Internal Signal Definition
+    // 1. Definition of State Constants (Match FSM)
     //==============================================================
-    
+    localparam S_CALC_A_M    = 5'd10;
+    localparam S_CALC_A_N    = 5'd11;
+    localparam S_CALC_A_LIST = 5'd12;
+    localparam S_CALC_A_ID   = 5'd13;
+    localparam S_CALC_B_M    = 5'd14;
+    localparam S_CALC_B_N    = 5'd15;
+    localparam S_CALC_B_LIST = 5'd16;
+    localparam S_CALC_B_ID   = 5'd17;
+
+    //==============================================================
+    // 2. Internal Signal Definition
+    //==============================================================
     wire rst_n = ~rst;
 
-    // --- FSM Control Signals ---
-    wire [1:0] mode;            // 00:Input, 01:Gen, 10:Display, 11:Calc
-    wire [3:0] op_type;         // 0:Transpose, 1:Add, 2:Scalar Mul, 3:Mat Mul, 5:Conv
-    wire timeout_en;            // Timeout enable
-    wire wen_store;             // Storage write enable
-    wire start_compute;         // Start computation pulse
-    wire update_config;         // Bonus: Update config register enable (from FSM)
+    // FSM Signals
+    wire [1:0] mode;
+    wire [3:0] op_type;
+    wire timeout_en;
+    wire wen_store;
+    wire start_compute;
+    wire update_config;
 
-    // --- Status Feedback Signals ---
+    // Status Signals
     wire uart_rx_done;
     wire [7:0] uart_rx_data;
     wire input_done;
     wire display_done;
-    wire store_error;           // Storage error signal
-    reg  compute_done;          // Aggregated computation done signal
-    reg  operand_legal;         // Aggregated operand legality check
-    reg  timeout_expired;       // Timeout expired flag
-    reg  error_flag;            // Error flag
+    wire store_error;
+    reg  compute_done;
+    reg  operand_legal;
+    reg  timeout_expired;
+    reg  error_flag;
 
-    // --- Debounce Signals ---
-    wire btn_confirm_pulse;
+    // Debounce Signals
+    wire [3:0] btn_debounced; 
 
-    // --- Data Path: Matrix Data and Dimensions ---
-    // Source matrices A and B read from storage
-    // Flattened array for Verilog-2001 compatibility: [8*25-1 : 0] = [199:0]
+    // Matrix Data
     wire [199:0] mat_a_wire;
     wire [199:0] mat_b_wire;
+    wire [3:0] dim_m_a, dim_n_a;
+    wire [3:0] dim_m_b, dim_n_b;
     
-    // Dimensions of source matrices
-    wire [3:0] dim_m_a, dim_n_a; // Matrix A dimensions (Rows, Cols)
-    wire [3:0] dim_m_b, dim_n_b; // Matrix B dimensions (Rows, Cols)
-    
-    // Source operand index / Scalar value / Config value
-    wire [MAX_STORE-1:0] sel_idx_a = sw[3:2]; // A Matrix Index
-    wire [MAX_STORE-1:0] sel_idx_b = sw[1:0]; // B Matrix Index
-    wire [3:0] scalar_val = sw[3:0];          // Scalar multiplier
+    // Inputs
+    wire [MAX_STORE-1:0] sel_idx_a = sw[3:2]; 
+    wire [MAX_STORE-1:0] sel_idx_b = sw[1:0]; 
+    wire [3:0] scalar_val = sw[3:0];
+    reg [3:0] cfg_timeout_val;
 
-    // --- Dynamic Parameter Configuration (Bonus) ---
-    reg [3:0] cfg_timeout_val;  // Configurable timeout duration
-
-    // --- UART TX Arbitration ---
+    // UART TX Arbitration
     reg [7:0] tx_data_mux;
     reg tx_start_mux;
     wire tx_busy;
-
-    // Sub-module TX interfaces
+    
+    // Sub-module interfaces
     wire [7:0] tx_disp_data, tx_trans_data, tx_add_data, tx_smul_data, tx_mmul_data, tx_conv_data;
     wire tx_disp_start, tx_trans_start, tx_add_start, tx_smul_start, tx_mmul_start, tx_conv_start;
-    
-    // Sub-module Done signals
     wire done_trans, done_add, done_smul, done_mmul, done_conv;
 
     //==============================================================
-    // 2. Basic Modules and Controller Instantiation
+    // 3. Debounce Modules
     //==============================================================
+    localparam DEBOUNCE_CNT = CLK_FREQ / 50; // 20ms
 
-    // Auto-calculate debounce counter threshold: 20ms
-    // If CLK_FREQ=100MHz -> 2,000,000
-    // If CLK_FREQ=100Hz  -> 2
-    localparam DEBOUNCE_CNT = CLK_FREQ / 50; 
+    genvar i;
+    generate
+        for (i = 0; i < 4; i = i + 1) begin : gen_debounce
+            debounce #(.CNT_MAX(DEBOUNCE_CNT)) btn_db (
+                .clk(clk),
+                .rst(rst),
+                .btn_in(btn[i]),
+                .btn_out(btn_debounced[i])
+            );
+        end
+    endgenerate
 
-    // Instantiate Debounce Module (for btn[0] Confirm)
-    debounce #(.CNT_MAX(DEBOUNCE_CNT)) btn0_debounce (
-        .clk(clk),
-        .rst(rst),
-        .btn_in(btn[0]),
-        .btn_out(btn_confirm_pulse)
-    );
-
+    //==============================================================
+    // 4. Capture Logic & FSM
+    //==============================================================
     wire [1:0] calc_step;
-    wire [4:0] fsm_state; // Added FSM state monitoring
+    wire [4:0] fsm_state;
     reg [7:0] id_a, id_b;
     reg [3:0] filter_m, filter_n;
 
-    // Capture IDs and Filter Dimensions
     always @(posedge clk) begin
         if (rst) begin
-            id_a <= 0;
-            id_b <= 0;
-            filter_m <= 0;
-            filter_n <= 0;
-        end else if (btn_confirm_pulse) begin
-            // Capture Filter Dimensions
-            if (fsm_state == 5'd10) filter_m <= sw[3:0]; // S_CALC_A_M
-            if (fsm_state == 5'd11) filter_n <= sw[3:0]; // S_CALC_A_N
-            if (fsm_state == 5'd14) filter_m <= sw[3:0]; // S_CALC_B_M
-            if (fsm_state == 5'd15) filter_n <= sw[3:0]; // S_CALC_B_N
-            
-            // Capture IDs
-            if (fsm_state == 5'd13) id_a <= sw; // S_CALC_A_ID
-            if (fsm_state == 5'd17) id_b <= sw; // S_CALC_B_ID
+            id_a <= 0; id_b <= 0; filter_m <= 0; filter_n <= 0;
+        end else if (btn_debounced[0]) begin 
+            if (fsm_state == S_CALC_A_M) filter_m <= sw[3:0];
+            if (fsm_state == S_CALC_A_N) filter_n <= sw[3:0];
+            if (fsm_state == S_CALC_B_M) filter_m <= sw[3:0];
+            if (fsm_state == S_CALC_B_N) filter_n <= sw[3:0];
+            if (fsm_state == S_CALC_A_ID) id_a <= sw; 
+            if (fsm_state == S_CALC_B_ID) id_b <= sw; 
         end
     end
 
     fsm_controller fsm_inst (
         .clk(clk), .rst(rst),
-        .btn({btn[3:1], btn_confirm_pulse}), // Connect debounced pulse to btn[0]
+        .btn(btn_debounced), 
         .sw(sw),
         .input_done(input_done),
         .display_done(display_done),
         .operand_legal(operand_legal),
         .compute_done(compute_done),
         .timeout_expired(timeout_expired),
-        // Outputs
         .mode(mode),
         .op_type(op_type),
         .timeout_en(timeout_en),
@@ -136,9 +133,12 @@ module matrix_calculator_top #(
         .start_compute(start_compute),
         .update_config(update_config),
         .calc_step(calc_step),
-        .fsm_state_out(fsm_state) // Connect new port
+        .fsm_state_out(fsm_state)
     );
 
+    //==============================================================
+    // 5. Interface & Storage Modules
+    //==============================================================
     uart_rx #(.CLK_FREQ(CLK_FREQ), .UART_BPS(115200)) rx_inst (
         .clk(clk), .rst_n(rst_n),
         .uart_rxd(uart_rx),
@@ -157,22 +157,20 @@ module matrix_calculator_top #(
     matrix_storage #(.MAX_DIM(MAX_DIM), .MAX_STORE(MAX_STORE)) store_inst (
         .clk(clk), .rst(rst),
         .wen(wen_store && uart_rx_done),
-        .flush(btn_confirm_pulse), // Added for manual finish
+        .flush(btn_debounced[0]), 
         .mode(mode), 
         .data_in(uart_rx_data),
         .read_id_a(id_a),
         .read_id_b(id_b),
-        // Outputs
         .mat_a_out(mat_a_wire),
         .mat_b_out(mat_b_wire),
-        .dim_a_m(dim_m_a), .dim_a_n(dim_n_a), // Output A dimensions
-        .dim_b_m(dim_m_b), .dim_b_n(dim_n_b), // Output B dimensions
+        .dim_a_m(dim_m_a), .dim_a_n(dim_n_a), 
+        .dim_b_m(dim_m_b), .dim_b_n(dim_n_b), 
         .input_done(input_done),
-        .error_flag(store_error), // Connect error signal
-        // Display Interface
+        .error_flag(store_error), 
         .display_start(mode == 2'b10),
-        .tx_busy(tx_busy), // Added
-        .filter_en(fsm_state == 5'd12 || fsm_state == 5'd16), // Enable filter during LIST states
+        .tx_busy(tx_busy),
+        .filter_en(fsm_state == S_CALC_A_LIST || fsm_state == S_CALC_B_LIST), 
         .filter_m(filter_m),
         .filter_n(filter_n),
         .tx_start(tx_disp_start),
@@ -181,10 +179,8 @@ module matrix_calculator_top #(
     );
 
     //==============================================================
-    // 3. Computation Modules Instantiation
+    // 6. Computation Modules
     //==============================================================
-
-    // 1. Transpose (Op: 0) - Only involves Matrix A
     transpose_module trans_inst (
         .clk(clk), .rst(rst),
         .start(start_compute && op_type == 4'd0),
@@ -196,11 +192,10 @@ module matrix_calculator_top #(
         .done(done_trans)
     );
 
-    // 2. Addition (Op: 1) - A + B
     add_module add_inst (
         .clk(clk), .rst(rst),
         .start(start_compute && op_type == 4'd1),
-        .m(dim_m_a), .n(dim_n_a), // Use A's dimensions if legal
+        .m(dim_m_a), .n(dim_n_a), 
         .in_a(mat_a_wire),
         .in_b(mat_b_wire),
         .tx_busy(tx_busy),
@@ -209,7 +204,6 @@ module matrix_calculator_top #(
         .done(done_add)
     );
 
-    // 3. Scalar Multiplication (Op: 2) - A * Scalar
     scalar_mul_module smul_inst (
         .clk(clk), .rst(rst),
         .start(start_compute && op_type == 4'd2),
@@ -222,13 +216,10 @@ module matrix_calculator_top #(
         .done(done_smul)
     );
 
-    // 4. Matrix Multiplication (Op: 3) - A(mxn) * B(nxp)
     mat_mul_module mmul_inst (
         .clk(clk), .rst(rst),
         .start(start_compute && op_type == 4'd3),
-        .m(dim_m_a),       // Result rows = A rows
-        .n(dim_n_a),       // Middle dim = A cols (must check == B rows)
-        .p(dim_n_b),       // Result cols = B cols
+        .m(dim_m_a), .n(dim_n_a), .p(dim_n_b), 
         .in_a(mat_a_wire),
         .in_b(mat_b_wire),
         .tx_busy(tx_busy),
@@ -237,12 +228,11 @@ module matrix_calculator_top #(
         .done(done_mmul)
     );
 
-    // 5. Convolution (Op: 5) - Bonus
-    wire [15:0] conv_cycle_cnt; // Cycle counter from conv module
+    wire [15:0] conv_cycle_cnt; 
     conv_module conv_inst (
         .clk(clk), .rst(rst),
         .start(start_compute && op_type == 4'd5),
-        .kernel_flat(mat_a_wire), // Use Matrix A as kernel
+        .kernel_flat(mat_a_wire),
         .tx_busy(tx_busy),
         .tx_start(tx_conv_start),
         .tx_data(tx_conv_data),
@@ -252,19 +242,17 @@ module matrix_calculator_top #(
     );
 
     //==============================================================
-    // 4. Combinational Logic: UART Arbitration & Legality Check
+    // 7. Combinational Logic: TX Mux & Legality
     //==============================================================
-
-    // --- UART TX Multiplexing ---
     always @(*) begin
         tx_data_mux  = 8'h00;
         tx_start_mux = 1'b0;
         
-        if (mode == 2'b10) begin // Display Mode
+        if (mode == 2'b10) begin 
             tx_data_mux  = tx_disp_data;
             tx_start_mux = tx_disp_start;
         end 
-        else if (mode == 2'b11) begin // Calculation Mode
+        else if (mode == 2'b11) begin 
             case (op_type)
                 4'd0: begin tx_data_mux = tx_trans_data; tx_start_mux = tx_trans_start; end
                 4'd1: begin tx_data_mux = tx_add_data;   tx_start_mux = tx_add_start;   end
@@ -276,9 +264,7 @@ module matrix_calculator_top #(
         end
     end
 
-    // --- Done Signal Aggregation & Legality Check ---
     always @(*) begin
-        // 1. Aggregate Done Signals
         compute_done = 1'b0;
         if (mode == 2'b11) begin
             case (op_type)
@@ -291,164 +277,182 @@ module matrix_calculator_top #(
             endcase
         end
 
-        // 2. Legality Check Logic
         operand_legal = 1'b1;
         error_flag = 1'b0;
         
         if (mode == 2'b11) begin
             case (op_type)
-                4'd1: begin // Addition: Must have same dimensions
-                    if (dim_m_a != dim_m_b || dim_n_a != dim_n_b)
-                        operand_legal = 1'b0;
+                4'd1: begin // Add
+                    if (dim_m_a != dim_m_b || dim_n_a != dim_n_b) operand_legal = 1'b0;
                 end
-                4'd3: begin // Multiplication: A cols must equal B rows
-                    if (dim_n_a != dim_m_b)
-                        operand_legal = 1'b0;
+                4'd3: begin // Mul
+                    if (dim_n_a != dim_m_b) operand_legal = 1'b0;
                 end
                 default: operand_legal = 1'b1;
             endcase
         end
-        
-        // Illegal operation sets error flag
         if (!operand_legal) error_flag = 1'b1;
     end
 
     //==============================================================
-    // 5. 7-Segment Decoding Function
+    // 8. Display Driver (FINAL CORRECTED: ACTIVE HIGH)
     //==============================================================
-    // Common Anode (0:On, 1:Off) - Display 0-F
+    
+    // 【关键修正】：使用高电平有效 (1=亮) 的段码表
+    // 对应 EGO1 硬件: 1=Light ON, 0=Light OFF
     function [7:0] decode_7seg(input [3:0] num);
         case(num)
-            4'h0: decode_7seg = 8'hC0; // 0
-            4'h1: decode_7seg = 8'hF9; // 1
-            4'h2: decode_7seg = 8'hA4; // 2
-            4'h3: decode_7seg = 8'hB0; // 3
-            4'h4: decode_7seg = 8'h99; // 4
-            4'h5: decode_7seg = 8'h92; // 5
-            4'h6: decode_7seg = 8'h82; // 6
-            4'h7: decode_7seg = 8'hF8; // 7
-            4'h8: decode_7seg = 8'h80; // 8
-            4'h9: decode_7seg = 8'h90; // 9
-            4'hA: decode_7seg = 8'h88; // A
-            4'hB: decode_7seg = 8'h83; // b
-            4'hC: decode_7seg = 8'hC6; // C
-            4'hD: decode_7seg = 8'hA1; // d
-            4'hE: decode_7seg = 8'h86; // E
-            4'hF: decode_7seg = 8'h8E; // F
-            default: decode_7seg = 8'hFF; // OFF
+            4'h0: decode_7seg = 8'h3F; // 0011_1111
+            4'h1: decode_7seg = 8'h06; // 0000_0110
+            4'h2: decode_7seg = 8'h5B; // 0101_1011
+            4'h3: decode_7seg = 8'h4F; // 0100_1111
+            4'h4: decode_7seg = 8'h66; // 0110_0110
+            4'h5: decode_7seg = 8'h6D; // 0110_1101
+            4'h6: decode_7seg = 8'h7D; // 0111_1101
+            4'h7: decode_7seg = 8'h07; // 0000_0111
+            4'h8: decode_7seg = 8'h7F; // 0111_1111
+            4'h9: decode_7seg = 8'h6F; // 0110_1111
+            4'hA: decode_7seg = 8'h77; // A
+            4'hB: decode_7seg = 8'h7C; // b
+            4'hC: decode_7seg = 8'h39; // C
+            4'hD: decode_7seg = 8'h5E; // d
+            4'hE: decode_7seg = 8'h79; // E
+            4'hF: decode_7seg = 8'h71; // F
+            default: decode_7seg = 8'h00; // 全灭 (0 is OFF)
+        endcase
+    endfunction
+    
+    // 【关键修正】：操作符显示也改为 Active High
+    function [7:0] decode_op_type(input [3:0] op);
+        case(op)
+            4'd0: decode_op_type = 8'h78; // t (0111_1000)
+            4'd1: decode_op_type = 8'h77; // A (0111_0111)
+            4'd2: decode_op_type = 8'h7C; // b (0111_1100)
+            4'd3: decode_op_type = 8'h39; // C (0011_1001)
+            4'd5: decode_op_type = 8'h1E; // J (0001_1110)
+            default: decode_op_type = 8'h00; // 全灭
         endcase
     endfunction
 
-    //==============================================================
-    // 6. Sequential Logic: Timeout and Display Driver
-    //==============================================================
     reg [31:0] timeout_cnt;
     reg [3:0] timeout_sec;
-    reg [16:0] scan_cnt; // Scan counter for 7-segment display
+    reg [16:0] scan_cnt;
+    reg [26:0] heartbeat;
+
+    // 扫描选择信号
+    wire [1:0] scan_sel = scan_cnt[16:15]; 
+
+    wire [3:0] timeout_tens = (timeout_sec >= 4'd10) ? 4'd1 : 4'd0;
+    wire [3:0] timeout_units = (timeout_sec >= 4'd10) ? (timeout_sec - 4'd10) : timeout_sec;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             timeout_cnt <= 0;
-            cfg_timeout_val <= TIMEOUT_DEFAULT; // Reset to default config
+            cfg_timeout_val <= TIMEOUT_DEFAULT;
             timeout_sec <= TIMEOUT_DEFAULT;
             timeout_expired <= 1'b0;
             led <= 8'b0;
-            an <= 4'b1110;
-            seg <= 8'hff;
+            
+            // 【关键修正】复位时全输出 0 (Active High Logic: 0 = OFF)
+            an <= 8'h00; 
+            seg <= 8'h00; 
+            
             scan_cnt <= 0;
+            heartbeat <= 0;
         end else begin
-            // --- Bonus: Dynamic Parameter Update ---
+            // Heartbeat Logic
+            heartbeat <= heartbeat + 1;
+
+            // Update Config
             if (update_config) begin
-                // Assume sw[3:0] is new time value in config mode
                 cfg_timeout_val <= (sw[3:0] > 4 && sw[3:0] <= 15) ? sw[3:0] : TIMEOUT_DEFAULT;
             end
 
-            // --- Timeout Logic ---
+            // Timeout Logic
             if (timeout_en) begin
                 if (timeout_cnt < CLK_FREQ - 1) begin
                     timeout_cnt <= timeout_cnt + 1;
                 end else begin
                     timeout_cnt <= 0;
-                    if (timeout_sec > 0)
-                        timeout_sec <= timeout_sec - 1;
-                    else
-                        timeout_expired <= 1'b1;
+                    if (timeout_sec > 0) timeout_sec <= timeout_sec - 1;
+                    else timeout_expired <= 1'b1;
                 end
             end else begin
                 timeout_cnt <= 0;
-                timeout_sec <= cfg_timeout_val; // Reset using config value
+                timeout_sec <= cfg_timeout_val; 
                 timeout_expired <= 1'b0;
             end
 
-            // --- LED Display ---
-            led[0] <= error_flag | store_error; // LED0: Error (includes storage error)
-            led[1] <= tx_busy;        // LED1: UART Busy
-            led[2] <= input_done;     // LED2: Input Done
-            led[3] <= display_done;   // LED3: Display Done
-            led[4] <= compute_done;   // LED4: Compute Done
-            led[7:5] <= fsm_state[2:0]; // LED7-5: FSM State (Debug)
+            // LED Status
+            led[0] <= error_flag | store_error;
+            led[1] <= tx_busy;      
+            led[2] <= input_done;   
+            led[3] <= display_done; 
+            led[4] <= compute_done; 
+            led[6:5] <= fsm_state[1:0]; 
+            led[7] <= heartbeat[26];
 
-            // --- 7-Segment Dynamic Scan ---
+            // ============================================
+            // 修正后的数码管扫描逻辑 (Active High)
+            // ============================================
             scan_cnt <= scan_cnt + 1;
-            if (scan_cnt == 0) begin
-                an <= {an[2:0], an[3]};   // Rotate digit selection
-            end
-            
+
+            // 1. 控制位选 (Anode Control - Active High)
+            // 扫描顺序：AN0 -> AN1 -> AN2 -> AN3 (只显示前4位)
+            // 注意：现在用 1 来选通
+            case (scan_sel)
+                2'b00: an <= 8'b0000_0001; // AN0 Active (Rightmost)
+                2'b01: an <= 8'b0000_0010; // AN1 Active
+                2'b10: an <= 8'b0000_0100; // AN2 Active
+                2'b11: an <= 8'b0000_1000; // AN3 Active (Leftmost of 4)
+            endcase
+
+            // 2. 控制段选 (Segment Control - Active High)
+            // default 必须是 8'h00 (全灭)
             if (mode == 2'b11) begin
-                if (op_type == 4'd5 && calc_step > 2) begin // Conv Exec
-                    case (an)
-                        4'b1110: seg <= decode_7seg(conv_cycle_cnt[15:12]);
-                        4'b1101: seg <= decode_7seg(conv_cycle_cnt[11:8]);
-                        4'b1011: seg <= decode_7seg(conv_cycle_cnt[7:4]);
-                        4'b0111: seg <= decode_7seg(conv_cycle_cnt[3:0]);
-                        default: seg <= 8'hff;
+                if (op_type == 4'd5 && calc_step > 2) begin 
+                    // 卷积结果显示
+                    case (scan_sel)
+                        2'b00: seg <= decode_7seg(conv_cycle_cnt[3:0]);   // AN0
+                        2'b01: seg <= decode_7seg(conv_cycle_cnt[7:4]);   // AN1
+                        2'b10: seg <= decode_7seg(conv_cycle_cnt[11:8]);  // AN2
+                        2'b11: seg <= decode_7seg(conv_cycle_cnt[15:12]); // AN3
+                        default: seg <= 8'h00;
                     endcase
                 end else begin
-                    // Calc Selection Mode
-                    case (an)
-                        4'b1110: begin // Digit 0: Step/Mode
-                            if (calc_step == 0) seg <= decode_op_type(sw[3:0]); // Show current Op selection
-                            else if (calc_step == 1) seg <= 8'h88; // 'A'
-                            else if (calc_step == 2) seg <= 8'h83; // 'b'
-                            else seg <= decode_op_type(op_type); // Exec
+                    // 普通运算结果显示
+                    case (scan_sel)
+                        2'b00: begin // AN0 (Rightmost)
+                            if (calc_step == 0) seg <= decode_op_type(sw[3:0]); 
+                            else if (calc_step == 1) seg <= 8'h77; // 'A' (Active High)
+                            else if (calc_step == 2) seg <= 8'h7C; // 'b' (Active High)
+                            else seg <= decode_op_type(op_type); 
                         end
-                        4'b1101: begin // Digit 1: Value High
+                        2'b01: begin // AN1
                             if (calc_step == 1 || calc_step == 2) seg <= decode_7seg(sw[7:4]);
-                            else seg <= 8'hff;
+                            else seg <= 8'h00; // OFF
                         end
-                        4'b1011: begin // Digit 2: Value Low
+                        2'b10: begin // AN2
                             if (calc_step == 1 || calc_step == 2) seg <= decode_7seg(sw[3:0]);
-                            else seg <= 8'hff;
+                            else seg <= decode_7seg(timeout_units);
                         end
-                        4'b0111: begin // Digit 3: Timeout
-                            seg <= decode_7seg(timeout_sec);
+                        2'b11: begin // AN3
+                            seg <= decode_7seg(timeout_tens);
                         end
-                        default: seg <= 8'hff;
+                        default: seg <= 8'h00;
                     endcase
                 end
             end else begin
-                // Default Display Mode
-                case (an)
-                    4'b1110: seg <= decode_7seg({2'b00, mode}); // Mode
-                    4'b1101: seg <= 8'hff;
-                    4'b1011: seg <= 8'hff;
-                    4'b0111: seg <= decode_7seg(timeout_sec); 
-                    default: seg <= 8'hff; 
+                // Default Mode (Input/Idle/Gen)
+                case (scan_sel)
+                    2'b00: seg <= decode_7seg(timeout_units); // AN0
+                    2'b01: seg <= decode_7seg(timeout_tens);  // AN1
+                    2'b10: seg <= 8'h00;                      // AN2 (OFF)
+                    2'b11: seg <= decode_7seg({2'b00, mode}); // AN3
+                    default: seg <= 8'h00; 
                 endcase
             end
         end
     end
-
-    // Helper Function: OpType Decoding
-    function [7:0] decode_op_type(input [3:0] op);
-        case(op)
-            4'd0: decode_op_type = 8'h78; // T (t)
-            4'd1: decode_op_type = 8'h88; // A
-            4'd2: decode_op_type = 8'h83; // B (b)
-            4'd3: decode_op_type = 8'hC6; // C
-            4'd5: decode_op_type = 8'hE1; // J (approx)
-            default: decode_op_type = 8'hFF;
-        endcase
-    endfunction
 
 endmodule

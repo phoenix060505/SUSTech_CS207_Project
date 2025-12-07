@@ -91,9 +91,17 @@ set_property PACKAGE_PIN C1 [get_ports {an[2]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {an[2]}]
 set_property PACKAGE_PIN H1 [get_ports {an[3]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {an[3]}]
-
+# 补充 AN4-AN7 的约束 (EGO1 标准引脚)
+set_property PACKAGE_PIN G1 [get_ports {an[4]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {an[4]}]
+set_property PACKAGE_PIN F1 [get_ports {an[5]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {an[5]}]
+set_property PACKAGE_PIN E1 [get_ports {an[6]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {an[6]}]
+set_property PACKAGE_PIN G6 [get_ports {an[7]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {an[7]}]
 # 时钟约束 (100MHz)
-# create_clock -period 10.000 -name sys_clk_pin -waveform {0.000 5.000} [get_ports clk]
+create_clock -period 10.000 -name sys_clk_pin -waveform {0.000 5.000} [get_ports clk]
 
 # 配置电压 (消除 CFGBVS 警告)
 set_property CFGBVS VCCO [current_design]

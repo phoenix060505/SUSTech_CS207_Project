@@ -26,6 +26,7 @@ module add_module #(
 
     wire ascii_done;
 
+    // Unpack flattened arrays
     wire [7:0] mat_a [0:24];
     wire [7:0] mat_b [0:24];
     
@@ -37,6 +38,8 @@ module add_module #(
         end
     endgenerate
 
+    // Instantiate ASCII Printer
+    // Assuming value_ascii_tx handles the 'tx_busy' wait internally or correctly
     value_ascii_tx printer (
         .clk(clk),
         .rst(rst),
@@ -58,6 +61,9 @@ module add_module #(
     localparam S_FINISH = 3'd4;
 
     reg [2:0] state;
+    
+    // Optimized Linear Index Counter
+    reg [4:0] linear_addr; 
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -66,6 +72,7 @@ module add_module #(
             done <= 1'b0;
             i <= 4'd0;
             j <= 4'd0;
+            linear_addr <= 5'd0;
             launch_ascii <= 1'b0;
             value_buf <= 16'd0;
             tail_char <= 8'h20;
@@ -79,13 +86,19 @@ module add_module #(
                         busy <= 1'b1;
                         i <= 4'd0;
                         j <= 4'd0;
+                        linear_addr <= 5'd0; // Reset address
                         state <= S_PREP;
                     end
                 end
 
                 S_PREP: begin
-                    value_buf <= mat_a[i * n + j] + mat_b[i * n + j];
+                    // Use pre-calculated linear address instead of (i * n + j)
+                    value_buf <= mat_a[linear_addr] + mat_b[linear_addr];
+                    
+                    // Determine newline or space
+                    // Note: 'n' comes from external input, make sure it's stable
                     tail_char <= ((n == 0) || (j == n - 1)) ? 8'h0A : 8'h20;
+                    
                     launch_ascii <= 1'b1;
                     state <= S_ASCII;
                 end
@@ -96,6 +109,8 @@ module add_module #(
                 end
 
                 S_NEXT: begin
+                    linear_addr <= linear_addr + 1'b1; // Increment linear address
+                    
                     if (j == n - 1) begin
                         j <= 0;
                         if (i == m - 1) begin
