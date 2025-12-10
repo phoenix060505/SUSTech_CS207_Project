@@ -9,6 +9,10 @@ module top (
     input  wire btn_s2,       // EGO1 R15 (返回)
     input  wire sw0_op,       // 运算类型 bit0
     input  wire sw1_op,       // 运算类型 bit1
+    input  wire sw2,          // 标量值 bit0 (0-15)
+    input  wire sw3,          // 标量值 bit1
+    input  wire sw4,          // 标量值 bit2
+    input  wire sw5,          // 标量值 bit3
     input  wire sw6_func,     // 功能选择 bit0
     input  wire sw7_func,     // 功能选择 bit1
     output wire [7:0] led,    // LED状态显示
@@ -26,6 +30,7 @@ module top (
     
     wire [1:0] op_mode_sel  = {sw1_op, sw0_op};
     wire [1:0] func_sel     = {sw7_func, sw6_func};
+    wire [3:0] scalar_input = {sw5, sw4, sw3, sw2};  // 标量值输入 (0-15)
     
     // =========================================================
     // UART 信号
@@ -404,6 +409,7 @@ module top (
         .rst_n(sys_rst_n),
         .op_mode(op_mode_sel),
         .func_sel(func_sel),
+        .scalar_input(scalar_input),
         .btn_start(btn_start_pulse),
         .btn_back(btn_back_pulse),
         .uart_rx_done(rx_done),

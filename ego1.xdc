@@ -47,6 +47,23 @@ set_property PACKAGE_PIN P5 [get_ports sw7_func]
 set_property IOSTANDARD LVCMOS33 [get_ports sw7_func]
 
 # ----------------------------------------------------------------------------
+# 4.2 标量值输入开关
+# SW2 (R2) + SW3 (T1) + SW4 (T2) + SW5 (R3) 组成 4-bit 标量值输入
+# 范围: 0-15
+# ----------------------------------------------------------------------------
+set_property PACKAGE_PIN M4 [get_ports sw2]
+set_property IOSTANDARD LVCMOS33 [get_ports sw2]
+
+set_property PACKAGE_PIN R2 [get_ports sw3]
+set_property IOSTANDARD LVCMOS33 [get_ports sw3]
+
+set_property PACKAGE_PIN P2 [get_ports sw4]
+set_property IOSTANDARD LVCMOS33 [get_ports sw4]
+
+set_property PACKAGE_PIN P3 [get_ports sw5]
+set_property IOSTANDARD LVCMOS33 [get_ports sw5]
+
+# ----------------------------------------------------------------------------
 # 5. UART 串口接口
 # 根据 EGO1 手册：
 # "UART RX" (Schematic) -> N5 (FPGA PIN) -> 这是 FPGA 的接收端 (RX)

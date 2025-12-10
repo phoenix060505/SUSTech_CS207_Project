@@ -9,6 +9,7 @@ module fsm_full (
     input  wire [1:0]  func_sel,         // 功能选择: 00=输入, 01=生成, 10=展示, 11=运算
     input  wire        btn_start,        // 确认按钮
     input  wire        btn_back,         // 返回按钮
+    input  wire [3:0]  scalar_input,     // 标量值输入 (0-15)
     
     // UART 接口
     input  wire        uart_rx_done,
@@ -132,9 +133,6 @@ module fsm_full (
     // 发送子状态
     localparam S_TX_WAIT       = 5'd29;
     
-    // 错误消息发送状态
-    localparam S_OP_SEND_ERROR = 5'd30;
-    
     // =========================================================
     // 寄存器定义
     // =========================================================
@@ -171,10 +169,6 @@ module fsm_full (
     reg [26:0] countdown_timer; // 1秒计数器 (100MHz)
     reg [4:0]  countdown_sec;   // 倒计时秒数
     reg [4:0]  countdown_cfg;   // 配置的倒计时时间 (默认10秒)
-    
-    // 错误类型寄存器
-    reg [1:0]  error_type;      // 0=无错误, 1=加法维度不同, 2=矩阵乘法维度不匹配, 3=无效维度
-    reg [7:0]  err_msg_phase;   // 错误消息发送阶段
     
     // 主状态输出
     always @(*) begin
@@ -253,8 +247,6 @@ module fsm_full (
             scan_m <= 1;
             scan_n <= 1;
             total_mat_count <= 0;
-            error_type <= 0;
-            err_msg_phase <= 0;
             
         end else begin
             // 脉冲信号复位
@@ -703,13 +695,12 @@ module fsm_full (
                                                 scan_m <= 1;
                                                 scan_n <= 1;
                                                 total_mat_count <= 0;
-                                                // 先设置第一个查询
-                                                query_m <= 4'd1;
-                                                query_n <= 4'd1;
                                                 send_phase <= 1;
                                             end
                                             1: begin
-                                                // 等待一个周期让查询结果稳定
+                                                // 设置查询维度
+                                                query_m <= {1'b0, scan_m};
+                                                query_n <= {1'b0, scan_n};
                                                 send_phase <= 2;
                                             end
                                             2: begin
@@ -718,14 +709,10 @@ module fsm_full (
                                                 // 移动到下一个维度
                                                 if (scan_n < 5) begin
                                                     scan_n <= scan_n + 1;
-                                                    query_m <= {1'b0, scan_m};
-                                                    query_n <= {1'b0, scan_n} + 1;
                                                     send_phase <= 1;
                                                 end else if (scan_m < 5) begin
                                                     scan_m <= scan_m + 1;
                                                     scan_n <= 1;
-                                                    query_m <= {1'b0, scan_m} + 1;
-                                                    query_n <= 4'd1;
                                                     send_phase <= 1;
                                                 end else begin
                                                     // 扫描完成，开始发送
@@ -757,14 +744,14 @@ module fsm_full (
                                                 // 重新开始扫描以发送详细信息
                                                 scan_m <= 1;
                                                 scan_n <= 1;
-                                                query_m <= 4'd1;
-                                                query_n <= 4'd1;
                                                 send_phase <= 5;
                                             end
                                             
                                             // === 阶段 5-12: 发送每种维度的 m*n*x ===
                                             5: begin
-                                                // 等待查询结果稳定
+                                                // 设置查询维度
+                                                query_m <= {1'b0, scan_m};
+                                                query_n <= {1'b0, scan_n};
                                                 send_phase <= 6;
                                             end
                                             6: begin
@@ -805,17 +792,13 @@ module fsm_full (
                                                 send_phase <= 12;
                                             end
                                             12: begin
-                                                // 移动到下一个维度，同时更新查询
+                                                // 移动到下一个维度
                                                 if (scan_n < 5) begin
                                                     scan_n <= scan_n + 1;
-                                                    query_m <= {1'b0, scan_m};
-                                                    query_n <= {1'b0, scan_n} + 1;
                                                     send_phase <= 5;
                                                 end else if (scan_m < 5) begin
                                                     scan_m <= scan_m + 1;
                                                     scan_n <= 1;
-                                                    query_m <= {1'b0, scan_m} + 1;
-                                                    query_n <= 4'd1;
                                                     send_phase <= 5;
                                                 end else begin
                                                     // 发送完成，换行
@@ -1086,16 +1069,10 @@ module fsm_full (
                                 end
                                 
                                 S_OP_GET_SCALAR: begin
-                                    // UART输入标量 (ASCII '0'-'9')
-                                    if (uart_rx_done) begin
-                                        if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
-                                            scalar_value <= uart_rx_data - 8'h30;
-                                            error_led <= 0;
-                                            sub_state <= S_OP_CHECK; // 收到标量后立即进入检查/运算
-                                        end else begin
-                                            error_led <= 1;
-                                        end
-                                    end
+                                    // 直接使用拨码开关输入标量值 (0-15)
+                                    scalar_value <= scalar_input;
+                                    error_led <= 0;
+                                    sub_state <= S_OP_CHECK; // 立即进入检查/运算
                                 end
                                 
                                 S_OP_CHECK: begin
@@ -1107,9 +1084,10 @@ module fsm_full (
                                                 error_led <= 0;
                                             end else begin
                                                 error_led <= 1;
-                                                error_type <= 2'd1;  // 加法维度错误
-                                                err_msg_phase <= 0;
-                                                sub_state <= S_OP_SEND_ERROR;
+                                                countdown_sec <= countdown_cfg;
+                                                countdown_timer <= 0;
+                                                countdown_active <= 1;
+                                                sub_state <= S_OP_COUNTDOWN;
                                             end
                                         end
                                         2'b01: begin  // 转置：总是合法
@@ -1124,109 +1102,13 @@ module fsm_full (
                                                 error_led <= 0;
                                             end else begin
                                                 error_led <= 1;
-                                                error_type <= 2'd2;  // 矩阵乘维度错误
-                                                err_msg_phase <= 0;
-                                                sub_state <= S_OP_SEND_ERROR;
-                                            end
-                                        end
-                                    endcase
-                                end
-                                
-                                // 发送错误消息状态
-                                S_OP_SEND_ERROR: begin
-                                    if (!tx_busy) begin
-                                        case (error_type)
-                                            2'd1: begin  // 加法维度错误: "ERR:ADD DIM MISMATCH\r\n"
-                                                case (err_msg_phase)
-                                                    0:  begin tx_data <= "E"; tx_data_valid <= 1; err_msg_phase <= 1; end
-                                                    1:  begin tx_data <= "R"; tx_data_valid <= 1; err_msg_phase <= 2; end
-                                                    2:  begin tx_data <= "R"; tx_data_valid <= 1; err_msg_phase <= 3; end
-                                                    3:  begin tx_data <= ":"; tx_data_valid <= 1; err_msg_phase <= 4; end
-                                                    4:  begin tx_data <= "A"; tx_data_valid <= 1; err_msg_phase <= 5; end
-                                                    5:  begin tx_data <= "D"; tx_data_valid <= 1; err_msg_phase <= 6; end
-                                                    6:  begin tx_data <= "D"; tx_data_valid <= 1; err_msg_phase <= 7; end
-                                                    7:  begin tx_data <= " "; tx_data_valid <= 1; err_msg_phase <= 8; end
-                                                    8:  begin tx_data <= "D"; tx_data_valid <= 1; err_msg_phase <= 9; end
-                                                    9:  begin tx_data <= "I"; tx_data_valid <= 1; err_msg_phase <= 10; end
-                                                    10: begin tx_data <= "M"; tx_data_valid <= 1; err_msg_phase <= 11; end
-                                                    11: begin tx_data <= " "; tx_data_valid <= 1; err_msg_phase <= 12; end
-                                                    12: begin tx_data <= "M"; tx_data_valid <= 1; err_msg_phase <= 13; end
-                                                    13: begin tx_data <= "I"; tx_data_valid <= 1; err_msg_phase <= 14; end
-                                                    14: begin tx_data <= "S"; tx_data_valid <= 1; err_msg_phase <= 15; end
-                                                    15: begin tx_data <= "M"; tx_data_valid <= 1; err_msg_phase <= 16; end
-                                                    16: begin tx_data <= "A"; tx_data_valid <= 1; err_msg_phase <= 17; end
-                                                    17: begin tx_data <= "T"; tx_data_valid <= 1; err_msg_phase <= 18; end
-                                                    18: begin tx_data <= "C"; tx_data_valid <= 1; err_msg_phase <= 19; end
-                                                    19: begin tx_data <= "H"; tx_data_valid <= 1; err_msg_phase <= 200; end
-                                                    200: begin tx_data <= 8'h0D; tx_data_valid <= 1; err_msg_phase <= 201; end
-                                                    201: begin tx_data <= 8'h0A; tx_data_valid <= 1; err_msg_phase <= 202; end
-                                                    202: begin
-                                                        // 启动倒计时
-                                                        countdown_sec <= countdown_cfg;
-                                                        countdown_timer <= 0;
-                                                        countdown_active <= 1;
-                                                        countdown_val <= countdown_cfg;
-                                                        // 重置选择状态
-                                                        selecting_second <= 0;
-                                                        op_sel_a_done <= 0;
-                                                        op_dim_ready <= 0;
-                                                        op_listed_once <= 0;
-                                                        sub_state <= S_OP_COUNTDOWN;
-                                                    end
-                                                    default: err_msg_phase <= 0;
-                                                endcase
-                                            end
-                                            
-                                            2'd2: begin  // 矩阵乘维度错误: "ERR:MULT An!=Bm\r\n"
-                                                case (err_msg_phase)
-                                                    0:  begin tx_data <= "E"; tx_data_valid <= 1; err_msg_phase <= 1; end
-                                                    1:  begin tx_data <= "R"; tx_data_valid <= 1; err_msg_phase <= 2; end
-                                                    2:  begin tx_data <= "R"; tx_data_valid <= 1; err_msg_phase <= 3; end
-                                                    3:  begin tx_data <= ":"; tx_data_valid <= 1; err_msg_phase <= 4; end
-                                                    4:  begin tx_data <= "M"; tx_data_valid <= 1; err_msg_phase <= 5; end
-                                                    5:  begin tx_data <= "U"; tx_data_valid <= 1; err_msg_phase <= 6; end
-                                                    6:  begin tx_data <= "L"; tx_data_valid <= 1; err_msg_phase <= 7; end
-                                                    7:  begin tx_data <= "T"; tx_data_valid <= 1; err_msg_phase <= 8; end
-                                                    8:  begin tx_data <= " "; tx_data_valid <= 1; err_msg_phase <= 9; end
-                                                    9:  begin tx_data <= "A"; tx_data_valid <= 1; err_msg_phase <= 10; end
-                                                    10: begin tx_data <= "n"; tx_data_valid <= 1; err_msg_phase <= 11; end
-                                                    11: begin tx_data <= "!"; tx_data_valid <= 1; err_msg_phase <= 12; end
-                                                    12: begin tx_data <= "="; tx_data_valid <= 1; err_msg_phase <= 13; end
-                                                    13: begin tx_data <= "B"; tx_data_valid <= 1; err_msg_phase <= 14; end
-                                                    14: begin tx_data <= "m"; tx_data_valid <= 1; err_msg_phase <= 200; end
-                                                    200: begin tx_data <= 8'h0D; tx_data_valid <= 1; err_msg_phase <= 201; end
-                                                    201: begin tx_data <= 8'h0A; tx_data_valid <= 1; err_msg_phase <= 202; end
-                                                    202: begin
-                                                        // 启动倒计时
-                                                        countdown_sec <= countdown_cfg;
-                                                        countdown_timer <= 0;
-                                                        countdown_active <= 1;
-                                                        countdown_val <= countdown_cfg;
-                                                        // 重置选择状态
-                                                        selecting_second <= 0;
-                                                        op_sel_a_done <= 0;
-                                                        op_dim_ready <= 0;
-                                                        op_listed_once <= 0;
-                                                        sub_state <= S_OP_COUNTDOWN;
-                                                    end
-                                                    default: err_msg_phase <= 0;
-                                                endcase
-                                            end
-                                            
-                                            default: begin
-                                                // 无效错误类型，直接进入倒计时
                                                 countdown_sec <= countdown_cfg;
                                                 countdown_timer <= 0;
                                                 countdown_active <= 1;
-                                                countdown_val <= countdown_cfg;
-                                                selecting_second <= 0;
-                                                op_sel_a_done <= 0;
-                                                op_dim_ready <= 0;
-                                                op_listed_once <= 0;
                                                 sub_state <= S_OP_COUNTDOWN;
                                             end
-                                        endcase
-                                    end
+                                        end
+                                    endcase
                                 end
                                 
                                 S_OP_COUNTDOWN: begin
@@ -1238,119 +1120,57 @@ module fsm_full (
                                         if (countdown_sec > 0) begin
                                             countdown_sec <= countdown_sec - 1;
                                         end else begin
-                                            // 超时，返回重选运算数起始阶段
+                                            // 超时，返回重选运算数
                                             countdown_active <= 0;
                                             error_led <= 0;
-                                            error_type <= 0;
                                             selecting_second <= 0;
                                             op_sel_a_done <= 0;
                                             op_dim_ready <= 0;
                                             op_listed_once <= 0;
-                                            send_phase <= 0;  // 重新发送概览信息
-                                            sub_state <= S_OP_SHOW_INFO;
+                                            sub_state <= S_OP_SEL_DIM_M;
                                         end
                                     end else begin
                                         countdown_timer <= countdown_timer + 1;
                                     end
                                     
-                                    // 倒计时期间允许通过UART重新输入
+                                    // 倒计时期间允许通过UART重新输入运算数编号 (ASCII '1'-'2')
                                     if (uart_rx_done) begin
-                                        // 配置倒计时时间 ASCII '5'-'9' -> 5~9秒，'0' -> 10秒
-                                        // 格式: 'T' + 数字 配置时间，或直接输入数字选矩阵
-                                        if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
-                                            // ASCII '1'-'5' 可能是维度输入
-                                            if (!op_sel_a_done) begin
-                                                // 正在输入第一个矩阵的维度m
-                                                sel_dim_m <= uart_rx_data - 8'h30;
-                                                op_dim_ready <= 0;
-                                                op_listed_once <= 0;
-                                                // 继续等待维度n，但不退出倒计时
-                                            end else if (selecting_second && !op_dim_ready) begin
-                                                // 正在输入第二个矩阵的维度m
-                                                sel_dim_m <= uart_rx_data - 8'h30;
-                                                op_dim_ready <= 0;
-                                                op_listed_once <= 0;
-                                            end
-                                        end
-                                        
-                                        // 处理维度n输入和矩阵槽选择
                                         if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h32) begin
-                                            // '1' 或 '2' - 选择矩阵槽
-                                            if (op_dim_ready) begin
-                                                if (!op_sel_a_done) begin
-                                                    sel_slot_a <= uart_rx_data[0] - 1;
-                                                    sel_m_a <= sel_dim_m[2:0];
-                                                    sel_n_a <= sel_dim_n[2:0];
-                                                    op_sel_a_done <= 1;
-                                                    // 根据运算类型决定下一步
-                                                    case (op_mode)
-                                                        2'b01: begin  // 转置：只需1个
-                                                            sub_state <= S_OP_CHECK;
-                                                            countdown_active <= 0;
-                                                            error_led <= 0;
-                                                        end
-                                                        2'b10: begin  // 标量乘：需要标量
-                                                            sub_state <= S_OP_GET_SCALAR;
-                                                            countdown_active <= 0;
-                                                            error_led <= 0;
-                                                        end
-                                                        default: begin  // 加法/矩阵乘：需要第二个
-                                                            selecting_second <= 1;
-                                                            if (op_mode == 2'b11) begin
-                                                                // 矩阵乘需要重新输入B的维度
-                                                                op_dim_ready <= 0;
-                                                                op_listed_once <= 0;
-                                                            end
-                                                        end
-                                                    endcase
-                                                end else if (selecting_second && op_dim_ready) begin
-                                                    sel_slot_b <= uart_rx_data[0] - 1;
-                                                    sel_m_b <= sel_dim_m[2:0];
-                                                    sel_n_b <= sel_dim_n[2:0];
-                                                    selecting_second <= 0;
-                                                    // 收齐后重新检查
-                                                    sub_state <= S_OP_CHECK;
-                                                    countdown_active <= 0;
-                                                    error_led <= 0;
-                                                end
-                                            end
-                                        end
-                                        
-                                        // 处理维度n输入 (可以是1-5)
-                                        if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35 && 
-                                            sel_dim_m != 0 && !op_dim_ready) begin
-                                            // 如果已输入m且n尚未确定
-                                            sel_dim_n <= uart_rx_data - 8'h30;
-                                            query_m <= sel_dim_m;
-                                            query_n <= uart_rx_data - 8'h30;
-                                            op_dim_ready <= 1;
-                                        end
-                                        
-                                        // 配置倒计时: 'C' + 数字 (5-15)
-                                        // 或直接输入数字 '5'-'9' 配置 5-9秒
-                                        // 输入 'A' 配置 10秒, 'B' 配置 11秒, ... 'F' 配置 15秒
-                                        if (uart_rx_data >= 8'h41 && uart_rx_data <= 8'h46) begin
-                                            // 'A'-'F' -> 10-15秒
-                                            countdown_cfg <= uart_rx_data - 8'h41 + 5'd10;
-                                        end
-                                    end
-                                    
-                                    // 按确认键时，如果已完成所有输入则立即检查
-                                    if (btn_start) begin
-                                        if (op_mode == 2'b01 || op_mode == 2'b10) begin
-                                            // 转置或标量乘：只需一个矩阵
-                                            if (op_sel_a_done) begin
+                                            // 重新选择运算数 ('1'->slot 0, '2'->slot 1)
+                                            if (!op_sel_a_done) begin
+                                                sel_slot_a <= uart_rx_data[0] - 1; // '1'->0, '2'->1
+                                                sel_m_a   <= sel_dim_m[2:0];
+                                                sel_n_a   <= sel_dim_n[2:0];
+                                                op_sel_a_done <= 1;
+                                                // 根据运算类型决定下一步
+                                                case (op_mode)
+                                                    2'b01: begin  // 转置：只需1个
+                                                        sub_state <= S_OP_CHECK;
+                                                        countdown_active <= 0;
+                                                    end
+                                                    2'b10: begin  // 标量乘：需要标量
+                                                        sub_state <= S_OP_GET_SCALAR;
+                                                        countdown_active <= 0;
+                                                    end
+                                                    default: begin  // 加法/矩阵乘：需要第二个
+                                                        selecting_second <= 1;
+                                                    end
+                                                endcase
+                                            end else if (selecting_second) begin
+                                                sel_slot_b <= uart_rx_data[0] - 1; // '1'->0, '2'->1
+                                                sel_m_b   <= sel_dim_m[2:0];
+                                                sel_n_b   <= sel_dim_n[2:0];
+                                                selecting_second <= 0;
+                                                // 收齐后重新检查
                                                 sub_state <= S_OP_CHECK;
                                                 countdown_active <= 0;
-                                                error_led <= 0;
                                             end
-                                        end else begin
-                                            // 加法或矩阵乘：需要两个矩阵
-                                            if (op_sel_a_done && !selecting_second) begin
-                                                sub_state <= S_OP_CHECK;
-                                                countdown_active <= 0;
-                                                error_led <= 0;
-                                            end
+                                            error_led <= 0;
+                                        end else if (uart_rx_data >= 8'h35 && uart_rx_data <= 8'h39) begin
+                                            // 配置倒计时时间 ASCII '5'-'9' -> 5~9秒
+                                            countdown_cfg <= uart_rx_data - 8'h30;
+                                        end else if (uart_rx_data == 8'h31 && uart_rx_data == 8'h30) begin
+                                            // '10' 需要两位，暂不支持，保持默认
                                         end
                                     end
                                 end
