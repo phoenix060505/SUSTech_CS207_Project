@@ -151,7 +151,9 @@ set_property IOSTANDARD LVCMOS33 [get_ports {seg1[7]}]
 # ============================================================================
 # 片选信号 (dig_sel) - 控制哪一个数码管亮
 # EGO1 为共阴极，且驱动电路高电平有效 (FPGA '1' = 数码管亮)
-# 对应引脚: DN0_K1(G2), DN0_K2(C2), DN0_K3(C1), DN0_K4(H1)
+# DN0组: DN0_K1(G2), DN0_K2(C2), DN0_K3(C1), DN0_K4(H1)
+# DN1组: DN1_K1(G1), DN1_K2(F1), DN1_K3(E1), DN1_K4(G6)
+# dig_sel[7:0] = {DN1_K4, DN1_K3, DN1_K2, DN1_K1, DN0_K4, DN0_K3, DN0_K2, DN0_K1}
 # ============================================================================
 set_property PACKAGE_PIN G2 [get_ports {dig_sel[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[0]}]
@@ -164,3 +166,15 @@ set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[2]}]
 
 set_property PACKAGE_PIN H1 [get_ports {dig_sel[3]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[3]}]
+
+set_property PACKAGE_PIN G1 [get_ports {dig_sel[4]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[4]}]
+
+set_property PACKAGE_PIN F1 [get_ports {dig_sel[5]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[5]}]
+
+set_property PACKAGE_PIN E1 [get_ports {dig_sel[6]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[6]}]
+
+set_property PACKAGE_PIN G6 [get_ports {dig_sel[7]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {dig_sel[7]}]

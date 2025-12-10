@@ -12,9 +12,9 @@ module mat_add #(
     
     // 双操作数选择
     input  wire                   slot_a_sel,   // 矩阵 A 的槽位
-    input  wire                   slot_a_valid, // A 槽位是否有效
+    input  wire                   slot_a_valid, 
     input  wire                   slot_b_sel,   // 矩阵 B 的槽位
-    input  wire                   slot_b_valid, // B 槽位是否有效
+    input  wire                   slot_b_valid, 
     
     // --- 状态输出 ---
     output reg                    ready,
@@ -25,12 +25,12 @@ module mat_add #(
     // 元数据输出
     output reg [2*DIM_WIDTH-1:0]  total_elements, 
 
-    // --- 存储读取接口 (单端口分时复用) ---
+    // --- 存储读取接口 ---
     output reg                    rd_en,
     output reg                    rd_slot_idx,
     output wire [DIM_WIDTH-1:0]   rd_row_idx,
     output wire [DIM_WIDTH-1:0]   rd_col_idx,
-    input  wire [DATA_WIDTH-1:0]  rd_elem,      
+    input  wire [DATA_WIDTH-1:0]  rd_elem,   
     input  wire                   rd_elem_valid,
 
     // --- 数据流输出 (Result = A + B) ---
@@ -40,7 +40,6 @@ module mat_add #(
     output reg                    out_last,
     output reg [2*DIM_WIDTH-1:0]  out_linear_idx
 );
-
     // ============================================================
     // 1. 状态定义
     // ============================================================
@@ -62,7 +61,6 @@ module mat_add #(
     reg [DIM_WIDTH-1:0] n_latched;
     reg                 slot_a_latched;
     reg                 slot_b_latched;
-    
     reg [DIM_WIDTH-1:0] row_cnt; 
     reg [DIM_WIDTH-1:0] col_cnt;
     
@@ -94,11 +92,12 @@ module mat_add #(
             end
             
             S_PRE_A: begin
-                // 一个周期的准备时间，让地址稳定
+                // 必须经过一个周期的 PRE 状态来稳定地址，并拉低 rd_en
                 next_state = S_WAIT_A;
             end
 
             S_WAIT_A: begin
+                // 等待存储模块返回有效数据
                 if (rd_elem_valid) 
                     next_state = S_PRE_B;
                 else 
@@ -138,15 +137,12 @@ module mat_add #(
             row_cnt         <= 0;
             col_cnt         <= 0;
             val_a_temp      <= 0;
-            
             ready           <= 1;
             busy            <= 0;
             done            <= 0;
             error           <= 0;
-            
             rd_en           <= 0;
             rd_slot_idx     <= 0;
-            
             out_valid       <= 0;
             out_elem        <= 0;
             out_row_end     <= 0;
@@ -156,14 +152,14 @@ module mat_add #(
 
         end else begin
             state <= next_state;
-
-            // 默认信号复位
+            
+            // 默认信号复位 (Pulse signals)
             out_valid   <= 0;
             out_row_end <= 0;
             out_last    <= 0;
             done        <= 0;
             error       <= 0;
-            // 注意：不要复位 out_elem，让它保持最后的值
+            // rd_en 默认由状态决定，不在默认里强制置0，而是在case里显式控制
             
             case (state)
                 S_IDLE: begin
@@ -180,7 +176,6 @@ module mat_add #(
                         slot_a_latched <= slot_a_sel;
                         slot_b_latched <= slot_b_sel;
                         total_elements <= m_sel * n_sel;
-                        
                         // 复位计数器
                         row_cnt        <= 0;
                         col_cnt        <= 0;
@@ -189,39 +184,43 @@ module mat_add #(
                 end
 
                 S_PRE_A: begin
-                    // 设置读取 A 的地址
+                    // 【关键修改】在准备阶段拉低 rd_en，确保读时序的上升沿
+                    rd_en       <= 0; 
                     rd_slot_idx <= slot_a_latched;
-                    rd_en       <= 1;
                 end
 
                 S_WAIT_A: begin
-                    // 保持读使能
+                    // 在等待阶段拉高 rd_en，一旦拿到数据立即拉低避免持续有效
                     rd_en       <= 1;
                     rd_slot_idx <= slot_a_latched;
                     
                     if (rd_elem_valid) begin
                         val_a_temp <= rd_elem; // 锁存 A
+                        rd_en      <= 0;       // 防止 combinational rd_elem_valid 一直为高
                     end
                 end
 
                 S_PRE_B: begin
-                    // 设置读取 B 的地址 (row/col cnt 此时还没变)
+                    // 【关键修改】拉低 rd_en
+                    rd_en       <= 0;
                     rd_slot_idx <= slot_b_latched;
-                    rd_en       <= 1;
                 end
 
                 S_WAIT_B: begin
+                    // 拉高 rd_en 等待 B，一旦采到数据立即拉低以免持续触发
                     rd_en       <= 1;
                     rd_slot_idx <= slot_b_latched;
 
                     if (rd_elem_valid) begin
+                        rd_en <= 0; // 防止 rd_elem_valid 持续为高导致重复输出
+
                         // 计算结果
                         out_valid <= 1;
                         out_elem  <= val_a_temp + rd_elem;
                         
                         // 更新线性索引
                         out_linear_idx <= out_linear_idx + 1;
-
+                        
                         // 边界标志
                         if (col_cnt == n_latched - 1) begin
                             out_row_end <= 1;
