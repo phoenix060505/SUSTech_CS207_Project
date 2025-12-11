@@ -100,39 +100,39 @@ module fsm_full (
     localparam S_IN_SET_DIM    = 5'd3;   // 先设置维度
     localparam S_IN_START_STORE= 5'd4;   // 再发送wen脉冲
     localparam S_IN_RX_DATA    = 5'd5;
-    localparam S_IN_FILL_ZEROS = 5'd30;  // 数据不足时自动补0
     localparam S_IN_DONE       = 5'd6;
+    localparam S_IN_FILL_ZEROS = 5'd7;   // 数据不足时自动补0
     
     // 生成模式子状态
-    localparam S_GEN_GET_M     = 5'd7;
-    localparam S_GEN_GET_N     = 5'd8;
-    localparam S_GEN_GET_CNT   = 5'd9;
-    localparam S_GEN_SET_DIM   = 5'd10;  // 先设置维度
-    localparam S_GEN_START     = 5'd11;  // 再发送wen脉冲
-    localparam S_GEN_FILL      = 5'd12;
-    localparam S_GEN_DONE      = 5'd13;
+    localparam S_GEN_GET_M     = 5'd8;
+    localparam S_GEN_GET_N     = 5'd9;
+    localparam S_GEN_GET_CNT   = 5'd10;
+    localparam S_GEN_SET_DIM   = 5'd11;  // 先设置维度
+    localparam S_GEN_START     = 5'd12;  // 再发送wen脉冲
+    localparam S_GEN_FILL      = 5'd13;
+    localparam S_GEN_DONE      = 5'd14;
     
     // 展示模式子状态
-    localparam S_DISP_START    = 5'd14;
-    localparam S_DISP_SEND_INFO= 5'd15;
-    localparam S_DISP_SEND_MAT = 5'd16;
-    localparam S_DISP_DONE     = 5'd17;
+    localparam S_DISP_START    = 5'd15;
+    localparam S_DISP_SEND_INFO= 5'd16;
+    localparam S_DISP_SEND_MAT = 5'd17;
+    localparam S_DISP_DONE     = 5'd18;
     
     // 运算模式子状态
-    localparam S_OP_SHOW_INFO  = 5'd18;
-    localparam S_OP_SEL_DIM_M  = 5'd19;
-    localparam S_OP_SEL_DIM_N  = 5'd20;
-    localparam S_OP_SHOW_MATS  = 5'd21;
-    localparam S_OP_SEL_MAT    = 5'd22;
-    localparam S_OP_GET_SCALAR = 5'd23;
-    localparam S_OP_CHECK      = 5'd24;
-    localparam S_OP_COUNTDOWN  = 5'd25;
-    localparam S_OP_CALC       = 5'd26;
-    localparam S_OP_OUTPUT     = 5'd27;
-    localparam S_OP_DONE       = 5'd28;
+    localparam S_OP_SHOW_INFO  = 5'd19;
+    localparam S_OP_SEL_DIM_M  = 5'd20;
+    localparam S_OP_SEL_DIM_N  = 5'd21;
+    localparam S_OP_SHOW_MATS  = 5'd22;
+    localparam S_OP_SEL_MAT    = 5'd23;
+    localparam S_OP_GET_SCALAR = 5'd24;
+    localparam S_OP_CHECK      = 5'd25;
+    localparam S_OP_COUNTDOWN  = 5'd26;
+    localparam S_OP_CALC       = 5'd27;
+    localparam S_OP_OUTPUT     = 5'd28;
+    localparam S_OP_DONE       = 5'd29;
     
     // 发送子状态
-    localparam S_TX_WAIT       = 5'd29;
+    localparam S_TX_WAIT       = 5'd30;
     
     // =========================================================
     // 寄存器定义
@@ -174,6 +174,11 @@ module fsm_full (
     // 输入超时检测
     reg [26:0] input_timeout_timer; // 输入超时计数器 (100MHz)
     reg        input_timeout_active; // 输入超时检测激活标志
+
+    // 两位数输入处理
+    reg [3:0]  digit_buffer;        // 数字缓冲区 (0-9)
+    reg        digit_buffer_valid;  // 缓冲区有效标志
+    reg [7:0]  temp_elem;           // 临时存储计算后的元素值
     
     // 主状态输出
     always @(*) begin
@@ -255,6 +260,9 @@ module fsm_full (
             scan_n <= 1;
             total_mat_count <= 0;
             
+            digit_buffer <= 0;
+            digit_buffer_valid <= 0;
+            
         end else begin
             // 脉冲信号复位
             store_wen <= 0;
@@ -324,90 +332,192 @@ module fsm_full (
                             S_IN_GET_M: begin
                                 error_led <= 0;
                                 if (uart_rx_done) begin
-                                    // 接受ASCII '1'-'5' (0x31-0x35)
+                                    // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
                                     if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
-                                        temp_m <= uart_rx_data - 8'h30; // '1'->1, '5'->5
+                                        temp_m <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_GET_N;
+                                    end else if (uart_rx_data == 8'h20) begin
+                                        // 忽略维度输入中的空格
                                     end else begin
-                                        error_led <= 1;  // 维度超范围
+                                        error_led <= 1;  // 违规操作，LED开始亮起
+                                        input_timeout_timer <= 0;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入，LED保持亮起
+                                            sub_state <= S_IN_GET_M;
+                                        end
                                     end
                                 end
                             end
                             
                             S_IN_GET_N: begin
                                 if (uart_rx_done) begin
-                                    // 接受ASCII '1'-'5' (0x31-0x35)
+                                    // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
                                     if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_n <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_SET_DIM;  // 先设置维度
-                                        error_led <= 0;
+                                        error_led <= 0;  // 输入正确，LED熄灭
+                                    end else if (uart_rx_data == 8'h20) begin
+                                        // 忽略维度输入中的空格
                                     end else begin
-                                        error_led <= 1;
+                                        error_led <= 1;  // 违规操作，LED亮起
+                                        input_timeout_timer <= 0;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入，LED保持亮起
+                                            sub_state <= S_IN_GET_M;
+                                        end
                                     end
                                 end
                             end
                             
                             // 新增：先设置维度，让存储模块计算好地址
                             S_IN_SET_DIM: begin
-                                store_m <= temp_m;
-                                store_n <= temp_n;
-                                elem_count <= 0;
-                                total_elems <= temp_m * temp_n;
-                                sub_state <= S_IN_START_STORE;
+                                // 检查是否有维度错误
+                                if (error_led) begin
+                                    // 有错误，不设置维度，直接回到输入开始状态
+                                    sub_state <= S_IN_GET_M;
+                                end else begin
+                                    // 无错误，设置维度并继续
+                                    store_m <= temp_m;
+                                    store_n <= temp_n;
+                                    elem_count <= 0;
+                                    total_elems <= temp_m * temp_n;
+                                    sub_state <= S_IN_START_STORE;
+                                end
                             end
                             
                             // 发送wen脉冲（此时m、n已经稳定）
                             S_IN_START_STORE: begin
-                                store_wen <= 1;
-                                sub_state <= S_IN_RX_DATA;
+                                // 再次检查是否有错误
+                                if (error_led) begin
+                                    // 有错误，不发送wen脉冲，直接回到输入开始状态
+                                    sub_state <= S_IN_GET_M;
+                                end else begin
+                                    // 无错误，发送wen脉冲并继续
+                                    store_wen <= 1;
+                                    sub_state <= S_IN_RX_DATA;
+                                end
                             end
                             
                             S_IN_RX_DATA: begin
-                                if (uart_rx_done) begin
-                                    // 接受ASCII '0'-'9' (0x30-0x39)
-                                    if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
-                                        if (elem_count < total_elems) begin
-                                            store_elem_in <= uart_rx_data - 8'h30;
-                                            store_elem_valid <= 1;
-                                            elem_count <= elem_count + 1;
-                                            error_led <= 0;
+                                    // 接收矩阵元素数据
+                                    if (uart_rx_done) begin
+                                        // 数字字符处理
+                                        if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
+                                            // 将ASCII数字转换为数值
+                                            if (!digit_buffer_valid) begin
+                                                // 缓冲区为空，存储第一个数字
+                                                digit_buffer <= uart_rx_data - 8'h30;
+                                                digit_buffer_valid <= 1;
+                                            end else begin
+                                                // 缓冲区已满，组合成两位数并检查范围
+                                                temp_elem <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
+                                                if (temp_elem <= 9) begin
+                                                    store_elem_in <= temp_elem;
+                                                    store_elem_valid <= 1;
+                                                    elem_count <= elem_count + 1;
+                                                    error_led <= 0;  // 输入正确，LED熄灭
+                                                end else begin
+                                                    // 数值超出范围，触发错误
+                                                    error_led <= 1;
+                                                    input_timeout_timer <= 0;
+                                                    input_timeout_active <= 1;
+                                                end
+                                                digit_buffer_valid <= 0;
+                                            end
                                         end
-                                        // 超出个数的忽略
-                                    end else begin
-                                        error_led <= 1;  // 元素超范围，需重新输入该元素
+                                        // 空格字符处理
+                                        else if (uart_rx_data == 8'h20) begin
+                                            if (digit_buffer_valid && elem_count < total_elems) begin
+                                                // 缓冲区有数字且未达到上限，存储缓冲区数字
+                                                if (digit_buffer <= 9) begin
+                                                    store_elem_in <= digit_buffer;
+                                                    store_elem_valid <= 1;
+                                                    elem_count <= elem_count + 1;
+                                                    error_led <= 0;  // 输入正确，LED熄灭
+                                                end else begin
+                                                    // 数值超出范围，触发错误
+                                                    error_led <= 1;
+                                                    input_timeout_timer <= 0;
+                                                    input_timeout_active <= 1;
+                                                end
+                                                digit_buffer_valid <= 0;
+                                            end
+                                            // 忽略多余的空格
+                                        end
+                                        // 回车或换行字符处理
+                                        else if (uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
+                                            if (digit_buffer_valid && elem_count < total_elems) begin
+                                                // 缓冲区有数字且未达到上限，存储缓冲区数字
+                                                if (digit_buffer <= 9) begin
+                                                    store_elem_in <= digit_buffer;
+                                                    store_elem_valid <= 1;
+                                                    elem_count <= elem_count + 1;
+                                                    error_led <= 0;  // 输入正确，LED熄灭
+                                                end else begin
+                                                    // 数值超出范围，触发错误
+                                                    error_led <= 1;
+                                                    input_timeout_timer <= 0;
+                                                    input_timeout_active <= 1;
+                                                end
+                                                digit_buffer_valid <= 0;
+                                            end
+                                            // 忽略回车换行
+                                        end
+                                        // 其他字符视为错误
+                                        else begin
+                                            error_led <= 1;
+                                            input_timeout_timer <= 0;
+                                            input_timeout_active <= 1;
+                                        end
                                     end
                                     
-                                    // 重置超时计数器，表示有新数据到达
-                                    input_timeout_timer <= 0;
-                                    input_timeout_active <= 1;
-                                end else if (input_timeout_active) begin
-                                    // 超时计数器递增
-                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
-                                        input_timeout_timer <= input_timeout_timer + 1;
-                                    end else begin
-                                        // 超时发生，认为用户点击了发送按钮，输入完成
-                                        input_timeout_active <= 0;
-                                        
-                                        // 检查是否需要补0
-                                        if (elem_count < total_elems) begin
-                                            // 数据不足，进入自动补0模式
-                                            sub_state <= S_IN_FILL_ZEROS;
+                                    // 超时处理
+                                    if (input_timeout_active) begin
+                                        if (input_timeout_timer < 27'd50_000_000) begin
+                                            input_timeout_timer <= input_timeout_timer + 1;
                                         end else begin
-                                            // 数据刚好或过多，等待存储完成
-                                            if (storage_input_done) begin
-                                                current_mat_idx <= current_mat_idx + 1;
+                                            input_timeout_active <= 0;
+                                            // 超时后处理剩余数字
+                                            if (digit_buffer_valid && elem_count < total_elems) begin
+                                                if (digit_buffer <= 9) begin
+                                                    store_elem_in <= digit_buffer;
+                                                    store_elem_valid <= 1;
+                                                    elem_count <= elem_count + 1;
+                                                end
+                                                digit_buffer_valid <= 0;
+                                            end
+                                            // 检查是否完成输入
+                                            if (elem_count >= total_elems) begin
                                                 sub_state <= S_IN_DONE;
+                                            end else begin
+                                                sub_state <= S_IN_FILL_ZEROS;
                                             end
                                         end
                                     end
+                                    
+                                    // 检查是否完成输入
+                                    if (elem_count >= total_elems) begin
+                                        sub_state <= S_IN_DONE;
+                                    end
                                 end
-                                
-                                // 如果数据量已经达到要求，直接完成
-                                if (elem_count >= total_elems && storage_input_done) begin
-                                    current_mat_idx <= current_mat_idx + 1;
-                                    sub_state <= S_IN_DONE;
-                                end
-                            end
                             
                             S_IN_FILL_ZEROS: begin
                                 // 数据不足时自动补0
@@ -425,9 +535,17 @@ module fsm_full (
                             end
                             
                             S_IN_DONE: begin
-                                led_status <= 2'b11;
-                                // 自动进入下一次输入，无需再次按键
-                                sub_state <= S_IN_GET_M;
+                                // 检查是否有错误发生
+                                if (error_led) begin
+                                    // 有错误，不存储矩阵，直接回到输入开始状态，LED保持亮起
+                                    led_status <= 2'b00;
+                                    sub_state <= S_IN_GET_M;
+                                end else begin
+                                    // 无错误，存储矩阵并继续
+                                    led_status <= 2'b11;
+                                    // 自动进入下一次输入，无需再次按键
+                                    sub_state <= S_IN_GET_M;
+                                end
                             end
                         endcase
                     end
@@ -448,6 +566,20 @@ module fsm_full (
                                         sub_state <= S_GEN_GET_N;
                                     end else begin
                                         error_led <= 1;
+                                        input_timeout_timer <= 0;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入
+                                            sub_state <= S_GEN_GET_M;
+                                        end
                                     end
                                 end
                             end
@@ -461,6 +593,20 @@ module fsm_full (
                                         error_led <= 0;
                                     end else begin
                                         error_led <= 1;
+                                        input_timeout_timer <= 0;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入
+                                            sub_state <= S_GEN_GET_M;
+                                        end
                                     end
                                 end
                             end
@@ -472,26 +618,54 @@ module fsm_full (
                                         gen_mat_count <= uart_rx_data - 8'h30; // '1'->1, '2'->2
                                         current_mat_idx <= 0;
                                         sub_state <= S_GEN_SET_DIM;  // 先设置维度
-                                        error_led <= 0;
+                                        error_led <= 0;  // 输入正确，LED熄灭
                                     end else begin
-                                        error_led <= 1;
+                                        error_led <= 1;  // 违规操作，LED亮起
+                                        input_timeout_timer <= 0;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入，LED保持亮起
+                                            sub_state <= S_GEN_GET_M;
+                                        end
                                     end
                                 end
                             end
                             
                             // 新增：先设置维度
                             S_GEN_SET_DIM: begin
-                                store_m <= temp_m;
-                                store_n <= temp_n;
-                                elem_count <= 0;
-                                total_elems <= temp_m * temp_n;
-                                sub_state <= S_GEN_START;
+                                // 检查是否有错误
+                                if (error_led) begin
+                                    // 有错误，不设置维度，直接回到开始状态
+                                    sub_state <= S_GEN_GET_M;
+                                end else begin
+                                    // 无错误，设置维度并继续
+                                    store_m <= temp_m;
+                                    store_n <= temp_n;
+                                    elem_count <= 0;
+                                    total_elems <= temp_m * temp_n;
+                                    sub_state <= S_GEN_START;
+                                end
                             end
                             
                             // 发送wen脉冲（此时m、n已经稳定）
                             S_GEN_START: begin
-                                store_wen <= 1;
-                                sub_state <= S_GEN_FILL;
+                                // 再次检查是否有错误
+                                if (error_led) begin
+                                    // 有错误，不发送wen脉冲，直接回到开始状态
+                                    sub_state <= S_GEN_GET_M;
+                                end else begin
+                                    // 无错误，发送wen脉冲并继续
+                                    store_wen <= 1;
+                                    sub_state <= S_GEN_FILL;
+                                end
                             end
                             
                             S_GEN_FILL: begin
@@ -646,7 +820,12 @@ module fsm_full (
                                         end
                                         4: begin  // 等待数据脉冲
                                             if (disp_rd_valid) begin
-                                                tx_data <= disp_rd_elem + 8'h30;
+                                                // 确保元素值在0-9范围内，避免乱码
+                                                if (disp_rd_elem <= 9) begin
+                                                    tx_data <= disp_rd_elem + 8'h30;  // 转换为ASCII数字
+                                                end else begin
+                                                    tx_data <= "?";  // 超出范围显示问号
+                                                end
                                                 tx_data_valid <= 1;
                                                 send_phase <= 5;
                                             end
@@ -908,6 +1087,8 @@ module fsm_full (
                                             if (!op_listed_once) begin
                                                 sub_state <= S_OP_SHOW_MATS;
                                                 send_phase <= 0;
+                                            end else begin
+                                                error_led <= 1;
                                             end
                                         end else begin
                                             error_led <= 1;

@@ -81,6 +81,7 @@ set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
 # LED1 (M1): 串口数据接收指示 (收到数据时翻转/闪烁)
 # LED2 (L1): 状态机就绪 (Ready)
 # LED7 (K1): 发送忙 (Tx Busy)
+# 大LED0 (K2): 矩阵输入维度/元素超限报错
 # ----------------------------------------------------------------------------
 set_property PACKAGE_PIN K3 [get_ports {led[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {led[0]}]
@@ -105,6 +106,9 @@ set_property IOSTANDARD LVCMOS33 [get_ports {led[6]}]
 
 set_property PACKAGE_PIN K1 [get_ports {led[7]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {led[7]}]
+
+set_property PACKAGE_PIN K2 [get_ports error_led]
+set_property IOSTANDARD LVCMOS33 [get_ports error_led]
 
 # ----------------------------------------------------------------------------
 # 7. 7段数码管显示 (7-Segment Display)

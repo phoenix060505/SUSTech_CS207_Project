@@ -16,6 +16,7 @@ module top (
     input  wire sw6_func,     // 功能选择 bit0
     input  wire sw7_func,     // 功能选择 bit1
     output wire [7:0] led,    // LED状态显示
+    output wire error_led,    // 错误LED指示
     
     // 7段数码管输出 (8个数码管)
     output wire [7:0] seg0,   // DN0段选
@@ -82,7 +83,6 @@ module top (
     
     wire [1:0]  main_state_out;
     wire [1:0]  fsm_led;
-    wire        error_led;
     wire [4:0]  countdown_val;
     wire        countdown_active;
     
@@ -126,7 +126,7 @@ module top (
     assign led[1] = store_done_toggle; // 每写完一矩阵翻转，便于用户确认
     assign led[3:2] = fsm_led;
     assign led[5:4] = main_state_out;
-    assign led[6] = error_led;
+    assign led[6] = 1'b0; // 错误LED指示，由FSM控制
     assign led[7] = tx_busy;
     
         always @(*) begin
