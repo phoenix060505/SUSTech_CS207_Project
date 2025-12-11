@@ -100,6 +100,7 @@ module fsm_full (
     localparam S_IN_SET_DIM    = 5'd3;   // 先设置维度
     localparam S_IN_START_STORE= 5'd4;   // 再发送wen脉冲
     localparam S_IN_RX_DATA    = 5'd5;
+    localparam S_IN_FILL_ZEROS = 5'd30;  // 数据不足时自动补0
     localparam S_IN_DONE       = 5'd6;
     
     // 生成模式子状态
@@ -170,6 +171,10 @@ module fsm_full (
     reg [4:0]  countdown_sec;   // 倒计时秒数
     reg [4:0]  countdown_cfg;   // 配置的倒计时时间 (默认10秒)
     
+    // 输入超时检测
+    reg [26:0] input_timeout_timer; // 输入超时计数器 (100MHz)
+    reg        input_timeout_active; // 输入超时检测激活标志
+    
     // 主状态输出
     always @(*) begin
         main_state_out = main_state;
@@ -227,6 +232,8 @@ module fsm_full (
             countdown_cfg <= 5'd10;  // 默认10秒
             countdown_timer <= 0;
             countdown_sec <= 0;
+            input_timeout_timer <= 0;
+            input_timeout_active <= 0;
             
             temp_m <= 0;
             temp_n <= 0;
@@ -369,11 +376,51 @@ module fsm_full (
                                     end else begin
                                         error_led <= 1;  // 元素超范围，需重新输入该元素
                                     end
+                                    
+                                    // 重置超时计数器，表示有新数据到达
+                                    input_timeout_timer <= 0;
+                                    input_timeout_active <= 1;
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，认为用户点击了发送按钮，输入完成
+                                        input_timeout_active <= 0;
+                                        
+                                        // 检查是否需要补0
+                                        if (elem_count < total_elems) begin
+                                            // 数据不足，进入自动补0模式
+                                            sub_state <= S_IN_FILL_ZEROS;
+                                        end else begin
+                                            // 数据刚好或过多，等待存储完成
+                                            if (storage_input_done) begin
+                                                current_mat_idx <= current_mat_idx + 1;
+                                                sub_state <= S_IN_DONE;
+                                            end
+                                        end
+                                    end
                                 end
                                 
-                                if (storage_input_done) begin
+                                // 如果数据量已经达到要求，直接完成
+                                if (elem_count >= total_elems && storage_input_done) begin
                                     current_mat_idx <= current_mat_idx + 1;
                                     sub_state <= S_IN_DONE;
+                                end
+                            end
+                            
+                            S_IN_FILL_ZEROS: begin
+                                // 数据不足时自动补0
+                                if (elem_count < total_elems) begin
+                                    store_elem_in <= 8'h0;  // 发送0值
+                                    store_elem_valid <= 1;
+                                    elem_count <= elem_count + 1;
+                                end else begin
+                                    // 补0完成，等待存储模块完成
+                                    if (storage_input_done) begin
+                                        current_mat_idx <= current_mat_idx + 1;
+                                        sub_state <= S_IN_DONE;
+                                    end
                                 end
                             end
                             

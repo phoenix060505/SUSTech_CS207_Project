@@ -127,8 +127,15 @@ module matrix_storage #(
                         input_done   <= 1'b1;
                         active_valid <= 1'b0;
                     end
+                end else begin
+                    // 输入数据个数超过维度乘积，忽略多余数据
+                    // 不更新计数器，不写入内存，等待输入完成信号
                 end
             end
+            
+            // 处理数据不足的情况：当UART输入完成但数据不足时，自动补0
+            // 这里需要添加超时检测机制来判断输入是否完成
+            // 暂时保持原逻辑，由FSM负责检测输入完成并触发补0
         end
     end
     
