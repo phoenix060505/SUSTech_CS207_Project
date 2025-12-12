@@ -172,7 +172,7 @@ module fsm_full (
     reg [4:0]  countdown_cfg;   // 配置的倒计时时间 (默认10秒)
     
     // 输入超时检测
-    reg [26:0] input_timeout_timer; // 输入超时计数器 (100MHz)
+    reg [31:0] input_timeout_timer; // 输入超时计数器 (100MHz)
     reg        input_timeout_active; // 输入超时检测激活标志
 
     // 两位数输入处理
@@ -416,108 +416,101 @@ module fsm_full (
                                 end
                             end
                             
+                            // 替换 fsm.v 中 S_IN_RX_DATA 的部分
                             S_IN_RX_DATA: begin
-                                    // 接收矩阵元素数据
-                                    if (uart_rx_done) begin
-                                        // 数字字符处理
-                                        if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
-                                            // 将ASCII数字转换为数值
-                                            if (!digit_buffer_valid) begin
-                                                // 缓冲区为空，存储第一个数字
-                                                digit_buffer <= uart_rx_data - 8'h30;
-                                                digit_buffer_valid <= 1;
-                                            end else begin
-                                                // 缓冲区已满，组合成两位数并检查范围
-                                                temp_elem <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
-                                                if (temp_elem <= 9) begin
-                                                    store_elem_in <= temp_elem;
-                                                    store_elem_valid <= 1;
-                                                    elem_count <= elem_count + 1;
-                                                    error_led <= 0;  // 输入正确，LED熄灭
-                                                end else begin
-                                                    // 数值超出范围，触发错误
-                                                    error_led <= 1;
-                                                    input_timeout_timer <= 0;
-                                                    input_timeout_active <= 1;
-                                                end
-                                                digit_buffer_valid <= 0;
-                                            end
-                                        end
-                                        // 空格字符处理
-                                        else if (uart_rx_data == 8'h20) begin
-                                            if (digit_buffer_valid && elem_count < total_elems) begin
-                                                // 缓冲区有数字且未达到上限，存储缓冲区数字
-                                                if (digit_buffer <= 9) begin
-                                                    store_elem_in <= digit_buffer;
-                                                    store_elem_valid <= 1;
-                                                    elem_count <= elem_count + 1;
-                                                    error_led <= 0;  // 输入正确，LED熄灭
-                                                end else begin
-                                                    // 数值超出范围，触发错误
-                                                    error_led <= 1;
-                                                    input_timeout_timer <= 0;
-                                                    input_timeout_active <= 1;
-                                                end
-                                                digit_buffer_valid <= 0;
-                                            end
-                                            // 忽略多余的空格
-                                        end
-                                        // 回车或换行字符处理
-                                        else if (uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
-                                            if (digit_buffer_valid && elem_count < total_elems) begin
-                                                // 缓冲区有数字且未达到上限，存储缓冲区数字
-                                                if (digit_buffer <= 9) begin
-                                                    store_elem_in <= digit_buffer;
-                                                    store_elem_valid <= 1;
-                                                    elem_count <= elem_count + 1;
-                                                    error_led <= 0;  // 输入正确，LED熄灭
-                                                end else begin
-                                                    // 数值超出范围，触发错误
-                                                    error_led <= 1;
-                                                    input_timeout_timer <= 0;
-                                                    input_timeout_active <= 1;
-                                                end
-                                                digit_buffer_valid <= 0;
-                                            end
-                                            // 忽略回车换行
-                                        end
-                                        // 其他字符视为错误
-                                        else begin
-                                            error_led <= 1;
-                                            input_timeout_timer <= 0;
-                                            input_timeout_active <= 1;
-                                        end
-                                    end
-                                    
-                                    // 超时处理
-                                    if (input_timeout_active) begin
-                                        if (input_timeout_timer < 27'd50_000_000) begin
-                                            input_timeout_timer <= input_timeout_timer + 1;
+                                // --------------------------------------------------------
+                                // 1. 全局计时器逻辑：无数据接收时一直计数，有数据则清零
+                                // --------------------------------------------------------
+                                if (uart_rx_done) begin
+                                    input_timeout_timer <= 0; // 收到数据，重置“发呆”计时器
+                                end else begin
+                                    // 防止溢出
+                                    if (input_timeout_timer < 32'd300_000_000) 
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                end
+
+                                // --------------------------------------------------------
+                                // 2. 数据接收处理
+                                // --------------------------------------------------------
+                                if (uart_rx_done) begin
+                                    // --- A. 数字字符处理 (0-9) ---
+                                    if (uart_rx_data >= 8'h30 && uart_rx_data <= 8'h39) begin
+                                        if (!digit_buffer_valid) begin
+                                            // 存入缓冲区
+                                            digit_buffer <= uart_rx_data - 8'h30;
+                                            digit_buffer_valid <= 1;
                                         end else begin
-                                            input_timeout_active <= 0;
-                                            // 超时后处理剩余数字
-                                            if (digit_buffer_valid && elem_count < total_elems) begin
-                                                if (digit_buffer <= 9) begin
-                                                    store_elem_in <= digit_buffer;
-                                                    store_elem_valid <= 1;
-                                                    elem_count <= elem_count + 1;
-                                                end
-                                                digit_buffer_valid <= 0;
-                                            end
-                                            // 检查是否完成输入
-                                            if (elem_count >= total_elems) begin
-                                                sub_state <= S_IN_DONE;
+                                            // 缓冲区已满，组合成两位数
+                                            temp_elem <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
+                                            // 合法性检查与存储
+                                            if (((digit_buffer * 10) + (uart_rx_data - 8'h30)) <= 9) begin 
+                                                store_elem_in <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
+                                                store_elem_valid <= 1;
+                                                elem_count <= elem_count + 1;
+                                                error_led <= 0;
                                             end else begin
-                                                sub_state <= S_IN_FILL_ZEROS;
+                                                error_led <= 1; // 越界报错
                                             end
+                                            digit_buffer_valid <= 0; // 清空缓冲区
                                         end
                                     end
-                                    
-                                    // 检查是否完成输入
-                                    if (elem_count >= total_elems) begin
-                                        sub_state <= S_IN_DONE;
+                                    // --- B. 分隔符处理 (空格/回车/换行) ---
+                                    else if (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
+                                        // 遇到分隔符，如果缓冲区有数字，先把它存进去
+                                        if (digit_buffer_valid && elem_count < total_elems) begin
+                                            store_elem_in <= digit_buffer;
+                                            store_elem_valid <= 1;
+                                            elem_count <= elem_count + 1;
+                                            error_led <= 0;
+                                            digit_buffer_valid <= 0;
+                                        end
+                                    end
+                                    // --- C. 非法字符 ---
+                                    else begin
+                                        error_led <= 1;
                                     end
                                 end
+
+                                // --------------------------------------------------------
+                                // 3. 超时处理逻辑 (双重模式)
+                                // --------------------------------------------------------
+                                
+                                // 模式A：错误恢复超时 (0.5秒 = 50,000,000)
+                                // 如果当前处于报错状态，0.5秒后自动熄灭LED，允许继续输入
+                                if (error_led && input_timeout_timer > 32'd50_000_000) begin
+                                    error_led <= 0;
+                                    input_timeout_timer <= 0; // 重置计时，重新开始检测空闲
+                                end
+
+                                // 模式B：空闲补零超时 (2.0秒 = 200,000,000)
+                                // 如果没有报错，且用户发呆超过2秒，认为输入结束
+                                else if (!error_led && input_timeout_timer > 32'd200_000_000) begin
+                                    input_timeout_timer <= 0;
+                                    
+                                    // 1. 如果缓冲区里还有个落单的数字，先存进去
+                                    if (digit_buffer_valid && elem_count < total_elems) begin
+                                        store_elem_in <= digit_buffer;
+                                        store_elem_valid <= 1;
+                                        elem_count <= elem_count + 1;
+                                        digit_buffer_valid <= 0;
+                                    end
+                                    
+                                    // 2. 状态跳转
+                                    // 注意：这里利用下一时钟周期的状态判断，
+                                    // 如果上面的 store_elem_valid 导致 elem_count 满了，
+                                    // 下面的状态跳转会在下下个周期被 S_IN_DONE 捕获（或者在这里直接预判）
+                                    
+                                    // 为简化逻辑，直接跳到补零状态，由 S_IN_FILL_ZEROS 里的逻辑判断是否真的需要补
+                                    sub_state <= S_IN_FILL_ZEROS;
+                                end
+                                
+                                // --------------------------------------------------------
+                                // 4. 完成检测 (最高优先级)
+                                // --------------------------------------------------------
+                                if (elem_count >= total_elems) begin
+                                    sub_state <= S_IN_DONE;
+                                end
+                            end
                             
                             S_IN_FILL_ZEROS: begin
                                 // 数据不足时自动补0
