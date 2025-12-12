@@ -315,6 +315,7 @@ module fsm_full (
                                 2'b11: begin
                                     main_state <= MAIN_DISPLAY;
                                     sub_state <= S_OP_SHOW_INFO;
+                                    send_phase <= 0; 
                                 end
                             endcase
                             current_mat_idx <= 0;
@@ -678,7 +679,16 @@ module fsm_full (
                             end
                             
                             S_GEN_DONE: begin
-                                led_status <= 2'b11;
+                                led_status <= 2'b11; // 完成状态指示
+                                
+                                // 【新增】按下确认键，重新开始生成流程
+                                if (btn_start) begin
+                                    error_led <= 0;
+                                    input_timeout_timer <= 0;
+                                    input_timeout_active <= 0;
+                                    led_status <= 2'b10; // 切回生成模式状态灯
+                                    sub_state <= S_GEN_GET_M; // 跳回获取维度 m 的状态
+                                end
                             end
                         endcase
                     end
@@ -894,7 +904,14 @@ module fsm_full (
                                 end
                                 
                                 S_DISP_DONE: begin
-                                    led_status <= 2'b11;
+                                    led_status <= 2'b11; // 完成状态指示
+                                    
+                                    // 【新增】按下确认键，重新开始展示流程
+                                    if (btn_start) begin
+                                        led_status <= 2'b01; // 切回展示模式状态灯
+                                        send_phase <= 100;   // 【关键】重置发送阶段为初始值(打印提示语)
+                                        sub_state <= S_DISP_START; // 跳回展示开始状态
+                                    end
                                 end
                             endcase
                             
@@ -1414,9 +1431,26 @@ module fsm_full (
                                 end
                                 
                                 S_OP_DONE: begin
-                                    led_status <= 2'b01;
+                                    // 运算结束，LED状态切回 "等待输入" (01)
+                                    led_status <= 2'b01; 
                                     countdown_active <= 0;
-                                    // 按返回键回主菜单
+                                    
+                                    // 【修改逻辑】支持按确认键(btn_start)继续当前运算
+                                    if (btn_start) begin
+                                        // 1. 重置所有运算相关的标志位
+                                        selecting_second <= 0; 
+                                        op_sel_a_done    <= 0; 
+                                        op_dim_ready     <= 0; 
+                                        op_listed_once   <= 0; 
+                                        error_led        <= 0; 
+                                        
+                                        // 2. 【关键修改】重置发送阶段计数器
+                                        send_phase <= 0; 
+
+                                        // 3. 【关键修改】跳转回 "展示矩阵概览" 状态
+                                        // 这样流程就是：概览 -> 选维度 -> 选矩阵 -> 计算
+                                        sub_state <= S_OP_SHOW_INFO;
+                                    end
                                 end
                             endcase
                         end
