@@ -10,6 +10,7 @@ module fsm_full (
     input  wire        btn_start,        // 确认按钮
     input  wire        btn_back,         // 返回按钮
     input  wire [3:0]  scalar_input,     // 标量值输入 (0-15)
+    input  wire        sw8_conv_mode,    // 卷积模式选择
     
     // UART 接口
     input  wire        uart_rx_done,
@@ -59,6 +60,13 @@ module fsm_full (
     input  wire        scalar_busy,
     input  wire        matmul_busy,
     
+    // Bonus Convolution
+    output reg         conv_start,
+    output reg         conv_kernel_valid,
+    output reg  [3:0]  conv_kernel_in,
+    input  wire        conv_busy,
+    input  wire        conv_done,
+
     // 运算参数输出
     output reg  [7:0]  scalar_value,
     output reg         sel_slot_a,       // 选中的第一个矩阵槽位(在当前维度下0或1)
@@ -92,54 +100,59 @@ module fsm_full (
     // 子状态定义
     // =========================================================
     // 通用
-    localparam S_IDLE          = 5'd0;
+    localparam S_IDLE          = 6'd0;
     
     // 输入模式子状态
-    localparam S_IN_GET_M      = 5'd1;
-    localparam S_IN_GET_N      = 5'd2;
-    localparam S_IN_SET_DIM    = 5'd3;   // 先设置维度
-    localparam S_IN_START_STORE= 5'd4;   // 再发送wen脉冲
-    localparam S_IN_RX_DATA    = 5'd5;
-    localparam S_IN_DONE       = 5'd6;
-    localparam S_IN_FILL_ZEROS = 5'd7;   // 数据不足时自动补0
+    localparam S_IN_GET_M      = 6'd1;
+    localparam S_IN_GET_N      = 6'd2;
+    localparam S_IN_SET_DIM    = 6'd3;   // 先设置维度
+    localparam S_IN_START_STORE= 6'd4;   // 再发送wen脉冲
+    localparam S_IN_RX_DATA    = 6'd5;
+    localparam S_IN_DONE       = 6'd6;
+    localparam S_IN_FILL_ZEROS = 6'd7;   // 数据不足时自动补0
     
     // 生成模式子状态
-    localparam S_GEN_GET_M     = 5'd8;
-    localparam S_GEN_GET_N     = 5'd9;
-    localparam S_GEN_GET_CNT   = 5'd10;
-    localparam S_GEN_SET_DIM   = 5'd11;  // 先设置维度
-    localparam S_GEN_START     = 5'd12;  // 再发送wen脉冲
-    localparam S_GEN_FILL      = 5'd13;
-    localparam S_GEN_DONE      = 5'd14;
+    localparam S_GEN_GET_M     = 6'd8;
+    localparam S_GEN_GET_N     = 6'd9;
+    localparam S_GEN_GET_CNT   = 6'd10;
+    localparam S_GEN_SET_DIM   = 6'd11;  // 先设置维度
+    localparam S_GEN_START     = 6'd12;  // 再发送wen脉冲
+    localparam S_GEN_FILL      = 6'd13;
+    localparam S_GEN_DONE      = 6'd14;
     
     // 展示模式子状态
-    localparam S_DISP_START    = 5'd15;
-    localparam S_DISP_SEND_INFO= 5'd16;
-    localparam S_DISP_SEND_MAT = 5'd17;
-    localparam S_DISP_DONE     = 5'd18;
+    localparam S_DISP_START    = 6'd15;
+    localparam S_DISP_SEND_INFO= 6'd16;
+    localparam S_DISP_SEND_MAT = 6'd17;
+    localparam S_DISP_DONE     = 6'd18;
     
     // 运算模式子状态
-    localparam S_OP_SHOW_INFO  = 5'd19;
-    localparam S_OP_SEL_DIM_M  = 5'd20;
-    localparam S_OP_SEL_DIM_N  = 5'd21;
-    localparam S_OP_SHOW_MATS  = 5'd22;
-    localparam S_OP_SEL_MAT    = 5'd23;
-    localparam S_OP_GET_SCALAR = 5'd24;
-    localparam S_OP_CHECK      = 5'd25;
-    localparam S_OP_COUNTDOWN  = 5'd26;
-    localparam S_OP_CALC       = 5'd27;
-    localparam S_OP_OUTPUT     = 5'd28;
-    localparam S_OP_DONE       = 5'd29;
+    localparam S_OP_SHOW_INFO  = 6'd19;
+    localparam S_OP_SEL_DIM_M  = 6'd20;
+    localparam S_OP_SEL_DIM_N  = 6'd21;
+    localparam S_OP_SHOW_MATS  = 6'd22;
+    localparam S_OP_SEL_MAT    = 6'd23;
+    localparam S_OP_GET_SCALAR = 6'd24;
+    localparam S_OP_CHECK      = 6'd25;
+    localparam S_OP_COUNTDOWN  = 6'd26;
+    localparam S_OP_CALC       = 6'd27;
+    localparam S_OP_OUTPUT     = 6'd28;
+    localparam S_OP_DONE       = 6'd29;
+    
+    // Bonus Convolution States
+    localparam S_CALC_CONV_INPUT = 6'd31;
+    localparam S_CALC_CONV_RUN   = 6'd32;
+    localparam S_CALC_CONV_DONE  = 6'd33;
     
     // 发送子状态
-    localparam S_TX_WAIT       = 5'd30;
+    localparam S_TX_WAIT       = 6'd30;
     
     // =========================================================
     // 寄存器定义
     // =========================================================
     reg [1:0]  main_state;
-    reg [4:0]  sub_state;
-    reg [4:0]  next_sub_state;  // 发送完成后返回的状态
+    reg [5:0]  sub_state;
+    reg [5:0]  next_sub_state;  // 发送完成后返回的状态
     
     // 输入/生成参数
     reg [3:0]  temp_m, temp_n;
@@ -314,8 +327,16 @@ module fsm_full (
                                 end
                                 2'b11: begin
                                     main_state <= MAIN_DISPLAY;
-                                    sub_state <= S_OP_SHOW_INFO;
-                                    send_phase <= 0; 
+                                    // Bonus Convolution Check
+                                    if (op_mode == 2'b11 && sw8_conv_mode) begin
+                                        sub_state <= S_CALC_CONV_INPUT;
+                                        send_phase <= 0;
+                                        elem_count <= 0; // Use to count kernel inputs (0..8)
+                                        conv_start <= 1; // Pulse start to reset convolution module
+                                    end else begin
+                                        sub_state <= S_OP_SHOW_INFO;
+                                        send_phase <= 0; 
+                                    end
                                 end
                             endcase
                             current_mat_idx <= 0;
@@ -1450,6 +1471,82 @@ module fsm_full (
                                         // 3. 【关键修改】跳转回 "展示矩阵概览" 状态
                                         // 这样流程就是：概览 -> 选维度 -> 选矩阵 -> 计算
                                         sub_state <= S_OP_SHOW_INFO;
+                                    end
+                                end
+                                
+                                // =============================================
+                                // Bonus Convolution States
+                                // =============================================
+                                S_CALC_CONV_INPUT: begin
+                                    conv_start <= 0; // Clear start pulse
+                                    led_status <= 2'b01; // Input Mode
+                                    conv_kernel_valid <= 0;
+                                    
+                                    if (!tx_busy) begin
+                                        case (send_phase)
+                                            // 1. Print Prompt "K:"
+                                            0: begin tx_data <= "K"; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= ":"; tx_data_valid <= 1; send_phase <= 2; end
+                                            
+                                            // 2. Wait for Input
+                                            2: begin
+                                                if (uart_rx_done && uart_rx_data >= "0" && uart_rx_data <= "9") begin
+                                                    // Send to Kernel Module
+                                                    conv_kernel_in <= uart_rx_data[3:0]; // 0-9
+                                                    conv_kernel_valid <= 1;
+                                                    
+                                                    // Echo Character
+                                                    tx_data <= uart_rx_data;
+                                                    tx_data_valid <= 1;
+                                                    
+                                                    send_phase <= 3; // Go to send space
+                                                end
+                                            end
+                                            
+                                            // 3. Send Space
+                                            3: begin
+                                                tx_data <= " ";
+                                                tx_data_valid <= 1;
+                                                
+                                                if (elem_count < 8) begin
+                                                    elem_count <= elem_count + 1;
+                                                    send_phase <= 2; // Back to wait for next digit
+                                                end else begin
+                                                    // All 9 digits received
+                                                    sub_state <= S_CALC_CONV_RUN;
+                                                    send_phase <= 0;
+                                                end
+                                            end
+                                        endcase
+                                    end
+                                end
+                                
+                                S_CALC_CONV_RUN: begin
+                                    conv_kernel_valid <= 0;
+                                    // Print CRLF before result
+                                    if (!tx_busy) begin
+                                        case (send_phase)
+                                            0: begin tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= 8'h0A; tx_data_valid <= 1; send_phase <= 2; end
+                                            2: begin
+                                                // Module auto-starts after 9th input, just wait
+                                                sub_state <= S_CALC_CONV_DONE;
+                                            end
+                                        endcase
+                                    end
+                                end
+                                
+                                S_CALC_CONV_DONE: begin
+                                    conv_start <= 0;
+                                    led_status <= 2'b11; // Busy/Done
+                                    
+                                    if (conv_done) begin
+                                        // Wait for restart
+                                        if (btn_start) begin
+                                            sub_state <= S_CALC_CONV_INPUT;
+                                            send_phase <= 0;
+                                            elem_count <= 0;
+                                        end
                                     end
                                 end
                             endcase

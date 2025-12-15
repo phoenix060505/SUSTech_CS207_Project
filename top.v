@@ -15,6 +15,7 @@ module top (
     input  wire sw5,          // 标量值 bit3
     input  wire sw6_func,     // 功能选择 bit0
     input  wire sw7_func,     // 功能选择 bit1
+    input  wire sw8,          // 卷积模式选择 (Bonus)
     output wire [7:0] led,    // LED状态显示
     output wire error_led,    // 错误LED指示
     
@@ -100,6 +101,18 @@ module top (
     // 存储读取信号
     wire [7:0] rd_elem;
     wire       rd_elem_valid;
+
+    // Bonus Convolution Signals
+    wire        conv_start;
+    wire        conv_kernel_valid;
+    wire [3:0]  conv_kernel_in;
+    wire        conv_busy;
+    wire        conv_done;
+    wire        conv_out_valid;
+    wire [11:0] conv_out_elem;
+    wire        conv_row_end;
+    wire        conv_last;
+    wire [15:0] conv_cycle_count;
     
     // 总线仲裁（包含维度信息）
     reg        mux_rd_en;
@@ -188,37 +201,41 @@ module top (
     // =========================================================
     // 结果输出和FIFO
     // =========================================================
-    wire       calc_res_valid = add_res_valid | trans_res_valid | scalar_res_valid | matmul_res_valid;
-    wire [7:0] calc_res_elem  = add_res_valid ? add_res_elem : 
-                                trans_res_valid ? trans_res_elem :
-                                scalar_res_valid ? scalar_res_elem :
-                                matmul_res_elem;
+    wire       calc_res_valid = add_res_valid | trans_res_valid | scalar_res_valid | matmul_res_valid | conv_out_valid;
+    wire [15:0] calc_res_elem  = add_res_valid ? {8'b0, add_res_elem} : 
+                                trans_res_valid ? {8'b0, trans_res_elem} :
+                                scalar_res_valid ? {8'b0, scalar_res_elem} :
+                                matmul_res_valid ? {8'b0, matmul_res_elem} :
+                                conv_out_valid ? {4'b0, conv_out_elem} : 16'd0;
     wire       calc_row_end   = add_res_valid ? add_row_end :
                                 trans_res_valid ? trans_row_end :
                                 scalar_res_valid ? scalar_row_end :
-                                matmul_row_end;
-// 【修改 1】扩大 FIFO 深度到 64，防止 5x5 矩阵结果溢出
-    reg [7:0]  res_fifo [0:63];          // 原来是 [0:15]
-    reg        res_row_end_fifo [0:63];  // 原来是 [0:15]
+                                matmul_res_valid ? matmul_row_end :
+                                conv_row_end;
+
+    // 【修改 1】扩大 FIFO 深度到 128，防止 8x10 矩阵结果溢出 (80 > 64)
+    // 【修改 5】强制使用寄存器 (Registers) 以确保绝对零延迟读取，彻底消除BRAM/LUTRAM潜在时序问题
+    (* ram_style = "registers" *) reg [15:0] res_fifo [0:127];          
+    (* ram_style = "registers" *) reg        res_row_end_fifo [0:127];  
     
-    // 【修改 2】增加指针位宽 (2^6 = 64)
-    reg [5:0]  res_wr_ptr, res_rd_ptr;   // 原来是 [3:0]
+    // 【修改 2】增加指针位宽 (2^7 = 128)
+    reg [6:0]  res_wr_ptr, res_rd_ptr;   
     
-    // 【修改 3】增加计数器位宽 (需能存下 64)
-    reg [6:0]  res_count;                // 原来是 [4:0]
+    // 【修改 3】增加计数器位宽 (需能存下 128)
+    reg [7:0]  res_count;                
     
     wire       res_fifo_empty = (res_count == 0);
     
     reg        dec_pending;
-    reg [7:0]  dec_val;
+    reg [15:0] dec_val;    // Upgrade to 16-bit
     reg        dec_row_end;    // 当前元素是否是行末
-    reg [2:0]  dec_stage;      // 需3-bit: 0~5 states (多加换行)
-    reg [1:0]  dec_start;      // 起始位：0=百位，1=十位，2=个位
+    reg [2:0]  dec_stage;      // 需3-bit: 0~7 states
+    reg [2:0]  dec_start;      // 起始位：0=千位，1=百位，2=十位，3=个位
     
-    // FIFO for TX
-    reg [7:0]  tx_fifo [0:63];
-    reg [5:0]  tx_wr_ptr, tx_rd_ptr;
-    reg [6:0]  tx_count;
+    // FIFO for TX - Increased to 512 to handle full burst without backpressure issues
+    reg [7:0]  tx_fifo [0:511];
+    reg [8:0]  tx_wr_ptr, tx_rd_ptr; // 9-bit for 512
+    reg [9:0]  tx_count;             // 10-bit for count
     reg [7:0]  tx_data_hold;     // latch head before advancing pointer
     wire       tx_fifo_empty = (tx_count == 0);
     
@@ -242,8 +259,8 @@ module top (
             res_count    <= 0;
         end else begin
             // 结果缓冲队列的写入（独立处理）- 同时保存元素和行末标志
-            // 【修改 4】将上限判断从 16 改为 64
-            if (calc_res_valid && res_count < 64) begin
+            // 【修改 4】将上限判断从 64 改为 128
+            if (calc_res_valid && res_count < 128) begin
                 res_fifo[res_wr_ptr] <= calc_res_elem;
                 res_row_end_fifo[res_wr_ptr] <= calc_row_end;
                 res_wr_ptr <= res_wr_ptr + 1;
@@ -258,14 +275,15 @@ module top (
                 dec_stage   <= 0;
                 // 计算起始位，跳过前导零 - 使用当前读指针的值
                 case (1'b1)
-                    (res_fifo[res_rd_ptr] >= 8'd100): dec_start <= 2'd0;  // 百位起
-                    (res_fifo[res_rd_ptr] >= 8'd10):  dec_start <= 2'd1;  // 十位起
-                    default:                          dec_start <= 2'd2;  // 个位起
+                    (res_fifo[res_rd_ptr] >= 16'd1000): dec_start <= 3'd0; // 千位起
+                    (res_fifo[res_rd_ptr] >= 16'd100):  dec_start <= 3'd1; // 百位起
+                    (res_fifo[res_rd_ptr] >= 16'd10):   dec_start <= 3'd2; // 十位起
+                    default:                            dec_start <= 3'd3; // 个位起
                 endcase
             end
             
             // 结果队列计数：精确处理同时读写
-            case ({calc_res_valid && res_count < 64, !dec_pending && res_count > 0})
+            case ({calc_res_valid && res_count < 128, !dec_pending && res_count > 0})
                 2'b10: res_count <= res_count + 1;
                 2'b01: res_count <= res_count - 1;
                 // 2'b11: 同时读写，计数不变
@@ -273,25 +291,26 @@ module top (
                 default: res_count <= res_count;
             endcase
             // 写入 - 优先FSM单字节，其次结果十进制展开
-            if (fsm_tx_valid && tx_count < 64) begin
+            if (fsm_tx_valid && tx_count < 512) begin
                 tx_fifo[tx_wr_ptr] <= fsm_tx_data;
                 tx_wr_ptr <= tx_wr_ptr + 1;
-            end else if (dec_pending && tx_count < 64) begin
+            end else if (dec_pending && tx_count < 512) begin
                 // 按 dec_start 起始输出，跳过前导零
-                // stage 0~2: 百/十/个位；stage 3: 空格；stage 4: 换行CR；stage 5: 换行LF
-                case (dec_stage + {1'b0, dec_start})
-                    3'd0: tx_fifo[tx_wr_ptr] <= 8'h30 + (dec_val / 100);        // 百位
-                    3'd1: tx_fifo[tx_wr_ptr] <= 8'h30 + ((dec_val % 100) / 10); // 十位
-                    3'd2: tx_fifo[tx_wr_ptr] <= 8'h30 + (dec_val % 10);         // 个位
-                    3'd3: tx_fifo[tx_wr_ptr] <= 8'h20;                          // 空格
-                    3'd4: tx_fifo[tx_wr_ptr] <= 8'h0D;                          // CR
-                    default: tx_fifo[tx_wr_ptr] <= 8'h0A;                       // LF
+                // stage 0~3: 千/百/十/个位；stage 4: 空格；stage 5: 换行CR；stage 6: 换行LF
+                case (dec_stage + dec_start)
+                    3'd0: tx_fifo[tx_wr_ptr] <= 8'h30 + (dec_val / 1000);             // 千位
+                    3'd1: tx_fifo[tx_wr_ptr] <= 8'h30 + ((dec_val % 1000) / 100);     // 百位
+                    3'd2: tx_fifo[tx_wr_ptr] <= 8'h30 + ((dec_val % 100) / 10);       // 十位
+                    3'd3: tx_fifo[tx_wr_ptr] <= 8'h30 + (dec_val % 10);               // 个位
+                    3'd4: tx_fifo[tx_wr_ptr] <= 8'h20;                                // 空格
+                    3'd5: tx_fifo[tx_wr_ptr] <= 8'h0D;                                // CR
+                    default: tx_fifo[tx_wr_ptr] <= 8'h0A;                             // LF
                 endcase
                 tx_wr_ptr <= tx_wr_ptr + 1;
                 // 完成判断：非行末输出到空格后结束；行末输出到LF后结束
                 if (dec_row_end) begin
                     // 行末：输出完 CR+LF 后结束
-                    if (dec_stage + {1'b0, dec_start} >= 3'd5) begin
+                    if (dec_stage + dec_start >= 3'd6) begin
                         dec_stage   <= 0;
                         dec_pending <= 0;
                     end else begin
@@ -299,7 +318,7 @@ module top (
                     end
                 end else begin
                     // 非行末：输出完空格后结束
-                    if (dec_stage + {1'b0, dec_start} >= 3'd3) begin
+                    if (dec_stage + dec_start >= 3'd4) begin
                         dec_stage   <= 0;
                         dec_pending <= 0;
                     end else begin
@@ -315,7 +334,7 @@ module top (
             end
             
             // 计数：精确处理同时读写（写触发=FSM有效或十进制展开一次）
-            case ({(fsm_tx_valid || (dec_pending && tx_count < 64)) , tx_fifo_rd_en && tx_count > 0})
+            case ({(fsm_tx_valid || (dec_pending && tx_count < 512)) , tx_fifo_rd_en && tx_count > 0})
                 2'b10: tx_count <= tx_count + 1;
                 2'b01: tx_count <= tx_count - 1;
                 default: tx_count <= tx_count;
@@ -410,6 +429,7 @@ module top (
         .op_mode(op_mode_sel),
         .func_sel(func_sel),
         .scalar_input(scalar_input),
+        .sw8_conv_mode(sw8), // New input
         .btn_start(btn_start_pulse),
         .btn_back(btn_back_pulse),
         .uart_rx_done(rx_done),
@@ -455,6 +475,12 @@ module top (
         .scalar_busy(scalar_busy),
         .matmul_busy(matmul_busy),
         
+        .conv_start(conv_start),
+        .conv_kernel_valid(conv_kernel_valid),
+        .conv_kernel_in(conv_kernel_in),
+        .conv_busy(conv_busy),
+        .conv_done(conv_done),
+
         .scalar_value(scalar_value),
         .sel_slot_a(sel_slot_a),
         .sel_slot_b(sel_slot_b),
@@ -639,6 +665,28 @@ module top (
         .seg0(seg0),
         .seg1(seg1),
         .dig_sel(dig_sel)
+    );
+
+    mat_conv_bonus #(
+        .DATA_WIDTH(4),
+        .KERNEL_WIDTH(4),
+        .ACC_WIDTH(12)
+    ) u_conv (
+        .clk(clk),
+        .rst_n(sys_rst_n),
+        .start(conv_start),
+        .kernel_in(conv_kernel_in),
+        .kernel_valid(conv_kernel_valid),
+        .kernel_ready(), 
+        .busy(conv_busy),
+        .done(conv_done),
+        .out_valid(conv_out_valid),
+        .out_elem(conv_out_elem),
+        .out_row_end(conv_row_end),
+        .out_last(conv_last),
+        .out_row_idx(),
+        .out_col_idx(),
+        .cycle_count(conv_cycle_count)
     );
 
 endmodule

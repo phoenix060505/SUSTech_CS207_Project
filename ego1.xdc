@@ -64,6 +64,13 @@ set_property PACKAGE_PIN P3 [get_ports sw5]
 set_property IOSTANDARD LVCMOS33 [get_ports sw5]
 
 # ----------------------------------------------------------------------------
+# 4.3 卷积模式选择开关 (Bonus)
+# SW8 (U3) - 0: 正常矩阵乘法, 1: 卷积模式
+# ----------------------------------------------------------------------------
+set_property PACKAGE_PIN U3 [get_ports sw8]
+set_property IOSTANDARD LVCMOS33 [get_ports sw8]
+
+# ----------------------------------------------------------------------------
 # 5. UART 串口接口
 # 根据 EGO1 手册：
 # "UART RX" (Schematic) -> N5 (FPGA PIN) -> 这是 FPGA 的接收端 (RX)
