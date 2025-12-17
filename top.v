@@ -113,6 +113,8 @@ module top (
     wire        conv_row_end;
     wire        conv_last;
     wire [15:0] conv_cycle_count;
+    reg  [15:0] conv_cycle_latched;
+    reg         conv_done_latched;
     
     // 总线仲裁（包含维度信息）
     reg        mux_rd_en;
@@ -141,6 +143,23 @@ module top (
     assign led[5:4] = main_state_out;
     assign led[6] = 1'b0; // 错误LED指示，由FSM控制
     assign led[7] = tx_busy;
+
+    // 卷积周期数锁存（在 conv_done 时捕获，显示用）
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            conv_cycle_latched <= 0;
+            conv_done_latched  <= 0;        end else if (main_state_out == 0) begin
+            // 返回主菜单时清除显示
+            conv_cycle_latched <= 0;
+            conv_done_latched  <= 0;        end else if (conv_start) begin
+            // 新一次卷积开始时清零计数显示
+            conv_cycle_latched <= 0;
+            conv_done_latched  <= 0;
+        end else if (conv_done) begin
+            conv_cycle_latched <= conv_cycle_count;
+            conv_done_latched  <= 1;
+        end
+    end
     
         always @(*) begin
         // 1. 硬件计算模块拥有最高优先级 (一旦开始计算，地址线必须锁定在计算模块上)
@@ -662,6 +681,9 @@ module top (
         .op_mode(op_mode_sel),
         .countdown_val(countdown_val),
         .countdown_active(countdown_active),
+        .conv_mode(sw8),
+        .conv_done(conv_done_latched),
+        .conv_cycle(conv_cycle_latched),
         .seg0(seg0),
         .seg1(seg1),
         .dig_sel(dig_sel)
