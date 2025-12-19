@@ -1745,12 +1745,16 @@ module fsm_full (
                                     
                                     if (!tx_busy) begin
                                         case (send_phase)
+                                            // 0. Print CR LF
+                                            0: begin tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= 8'h0A; tx_data_valid <= 1; send_phase <= 2; end
+
                                             // 1. Print Prompt "K:"
-                                            0: begin tx_data <= "K"; tx_data_valid <= 1; send_phase <= 1; end
-                                            1: begin tx_data <= ":"; tx_data_valid <= 1; send_phase <= 2; end
+                                            2: begin tx_data <= "K"; tx_data_valid <= 1; send_phase <= 3; end
+                                            3: begin tx_data <= ":"; tx_data_valid <= 1; send_phase <= 4; end
                                             
                                             // 2. Wait for Input
-                                            2: begin
+                                            4: begin
                                                 if (uart_rx_done && uart_rx_data >= "0" && uart_rx_data <= "9") begin
                                                     // Send to Kernel Module
                                                     conv_kernel_in <= uart_rx_data[3:0]; // 0-9
@@ -1760,18 +1764,18 @@ module fsm_full (
                                                     tx_data <= uart_rx_data;
                                                     tx_data_valid <= 1;
                                                     
-                                                    send_phase <= 3; // Go to send space
+                                                    send_phase <= 5; // Go to send space
                                                 end
                                             end
                                             
                                             // 3. Send Space
-                                            3: begin
+                                            5: begin
                                                 tx_data <= " ";
                                                 tx_data_valid <= 1;
                                                 
                                                 if (elem_count < 8) begin
                                                     elem_count <= elem_count + 1;
-                                                    send_phase <= 2; // Back to wait for next digit
+                                                    send_phase <= 4; // Back to wait for next digit
                                                 end else begin
                                                     // All 9 digits received
                                                     sub_state <= S_CALC_CONV_RUN;
