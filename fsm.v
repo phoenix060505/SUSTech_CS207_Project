@@ -138,14 +138,19 @@ module fsm_full (
     localparam S_OP_CALC       = 6'd27;
     localparam S_OP_OUTPUT     = 6'd28;
     localparam S_OP_DONE       = 6'd29;
-    
+        
+    // 发送子状态
+    localparam S_TX_WAIT       = 6'd30;
+
     // Bonus Convolution States
     localparam S_CALC_CONV_INPUT = 6'd31;
     localparam S_CALC_CONV_RUN   = 6'd32;
     localparam S_CALC_CONV_DONE  = 6'd33;
-    
-    // 发送子状态
-    localparam S_TX_WAIT       = 6'd30;
+
+    localparam S_RAND_SEARCH_A = 6'd34; // 随机搜索 A
+    localparam S_RAND_SEARCH_B = 6'd35; // 随机搜索 B
+    localparam S_ECHO_PREP     = 6'd36; // 准备回显
+    localparam S_ECHO_PRINT    = 6'd37; // 执行回显打印
     
     // =========================================================
     // 寄存器定义
@@ -192,7 +197,9 @@ module fsm_full (
     reg [3:0]  digit_buffer;        // 数字缓冲区 (0-9)
     reg        digit_buffer_valid;  // 缓冲区有效标志
     reg [7:0]  temp_elem;           // 临时存储计算后的元素值
-    
+    reg [7:0]  rand_retry_cnt;   // 随机重试计数器
+    reg [3:0]  echo_m, echo_n;   // 待回显矩阵的维度
+    reg        echo_slot;        // 待回显矩阵的槽位
     // 主状态输出
     always @(*) begin
         main_state_out = main_state;
@@ -275,7 +282,8 @@ module fsm_full (
             
             digit_buffer <= 0;
             digit_buffer_valid <= 0;
-            
+            rand_retry_cnt <= 0;
+            echo_m <= 0; echo_n <= 0; echo_slot <= 0;
         end else begin
             // 脉冲信号复位
             store_wen <= 0;
@@ -1081,25 +1089,32 @@ module fsm_full (
                                 end
                                 
                                 S_OP_SEL_DIM_M: begin
-                                    error_led <= 0;
+                                    // 保持 Error LED 状态（如果之前报错了，进入这里后等待新输入或超时清除）
                                     if (uart_rx_done) begin
-                                        // 接受ASCII '1'-'5' (0x31-0x35)
-                                        if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
+                                        // 【修改】检测 'R' 键触发随机模式
+                                        if (uart_rx_data == "R" || uart_rx_data == "r") begin
+                                            rand_retry_cnt <= 0;          // 搜索次数计数器清零
+                                            rand_enable <= 1;             // 开启随机数
+                                            op_sel_a_done <= 0;           // 重置 A 选择标志
+                                            selecting_second <= 0;        // 重置 B 选择标志
+                                            send_phase <= 0;              // 相位清零
+                                            error_led <= 0;               // 先熄灭错误灯
+                                            sub_state <= S_RAND_SEARCH_A; // 开始搜寻 A
+                                        end
+                                        // 正常数字输入处理...
+                                        else if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                             sel_dim_m <= uart_rx_data - 8'h30;
-                                            op_dim_ready <= 0; // 重新开始收集维度
-                                            op_listed_once <= 0; // 允许新维度重新输出
-                                            
-                                            // 【修改点】增加了条件判断！
-                                            // 如果 op_sel_a_done 为 1，说明是矩阵乘法回头选 B，不要清零！
-                                            // 只有在选 A (op_sel_a_done == 0) 时，才重置这些标志。
+                                            op_dim_ready <= 0; 
+                                            op_listed_once <= 0;
+                                            // 如果是选 A，重置标志；如果是乘法回头选 B，保持标志
                                             if (!op_sel_a_done) begin
                                                 selecting_second <= 0;
                                                 op_sel_a_done <= 0; 
                                             end
-                                            
+                                            error_led <= 0; // 输入正确，灭灯
                                             sub_state <= S_OP_SEL_DIM_N;
                                         end else begin
-                                            error_led <= 1;
+                                            error_led <= 1; // 输入非法字符
                                         end
                                     end
                                 end
@@ -1278,55 +1293,301 @@ module fsm_full (
                                 
 
                                 S_OP_SEL_MAT: begin
-                                    // 用户输入矩阵编号 (ASCII '1' 或 '2')
                                     if (uart_rx_done) begin
                                         if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h32) begin
                                             if (!op_sel_a_done) begin
-                                                sel_slot_a <= uart_rx_data[0] - 1; // '1'->0, '2'->1
+                                                // === 选中 A ===
+                                                sel_slot_a <= uart_rx_data[0] - 1;
                                                 sel_m_a   <= sel_dim_m[2:0];
                                                 sel_n_a   <= sel_dim_n[2:0];
                                                 op_sel_a_done <= 1;
                                                 error_led <= 0;
-                                                // 根据运算类型决定是否需要第二个矩阵
-                                                case (op_mode)
-                                                    2'b01: begin  // 转置：只需1个矩阵，立即进入检查
-                                                        sub_state <= S_OP_CHECK;
-                                                    end
-                                                    2'b10: begin  // 标量乘：1个矩阵，再输入标量
-                                                        sub_state <= S_OP_GET_SCALAR;
-                                                    end
-                                                    default: begin  // 加法、矩阵乘：需要第二个矩阵
-                                                        selecting_second <= 1; // 标记正在选第二个
-                                                        
-                                                        if (op_mode == 2'b11) begin 
-                                                            // 【新增逻辑】如果是矩阵乘法，A和B维度不同
-                                                            // 必须跳回前面，让用户输入矩阵 B 的维度
-                                                            sub_state <= S_OP_SEL_DIM_M; 
-                                                            
-                                                            // 重置维度输入相关的标志位，以便重新接收 UART 输入
-                                                            op_dim_ready <= 0;
-                                                            op_listed_once <= 0;
-                                                            
-                                                            // 注意：此时 sel_m_a, sel_n_a 已经被上面的代码锁存好了，
-                                                            // 所以我们重新使用 sel_dim_m/n 变量来存 B 的维度是安全的。
-                                                        end 
-                                                        // 如果是加法(00)，保持原逻辑（维度相同，直接去选矩阵B）
-                                                    end
-                                                endcase
+                                                
+                                                // 配置回显参数
+                                                echo_m <= sel_dim_m;
+                                                echo_n <= sel_dim_n;
+                                                echo_slot <= uart_rx_data[0] - 1;
+                                                
+                                                // 【修改核心】：决定回显完去哪
+                                                if (op_mode == 2'b01) next_sub_state <= S_OP_CHECK;      // 转置 -> 检查
+                                                else if (op_mode == 2'b10) next_sub_state <= S_OP_GET_SCALAR; // 标量 -> 输标量
+                                                else if (op_mode == 2'b11) next_sub_state <= S_OP_SEL_DIM_M;  // 乘法 -> 选B维度
+                                                
+                                                // 【修改点】：加法模式(00)，直接去选B (S_OP_SEL_MAT)，不要再展示冗余列表
+                                                else next_sub_state <= S_OP_SEL_MAT; 
+
+                                                if (op_mode == 2'b00 || op_mode == 2'b11) selecting_second <= 1;
+                                                
+                                                send_phase <= 0;
+                                                sub_state <= S_ECHO_PREP; // 【跳转】去回显
+
                                             end else if (selecting_second) begin
-                                                sel_slot_b <= uart_rx_data[0] - 1; // '1'->0, '2'->1
-                                                sel_m_b   <= sel_dim_m[2:0];
+                                                // === 选中 B ===
+                                                sel_slot_b <= uart_rx_data[0] - 1;
+                                                sel_m_b   <= sel_dim_m[2:0]; 
                                                 sel_n_b   <= sel_dim_n[2:0];
                                                 selecting_second <= 0;
                                                 error_led <= 0;
-                                                sub_state <= S_OP_CHECK; // 收到第二个后立即检查/运算
+                                                
+                                                // 配置回显 B
+                                                echo_m <= sel_dim_m;
+                                                echo_n <= sel_dim_n;
+                                                echo_slot <= uart_rx_data[0] - 1;
+                                                
+                                                next_sub_state <= S_OP_CHECK; // 回显完去检查/计算
+                                                send_phase <= 0;
+                                                sub_state <= S_ECHO_PREP; // 【跳转】去回显
                                             end
                                         end else begin
                                             error_led <= 1;
                                         end
                                     end
                                 end
+                                // ========================================================
+                                // 随机搜索 A 逻辑 (修复位宽越界问题)
+                                // ========================================================
+                                S_RAND_SEARCH_A: begin
+                                    rand_enable <= 1; // 开启随机数生成
+                                    
+                                    // 超时保护
+                                    if (rand_retry_cnt > 250) begin
+                                        error_led <= 1;
+                                        send_phase <= 0;
+                                        sub_state <= S_OP_SHOW_INFO;
+                                    end else begin
+                                        
+                                        case (send_phase)
+                                            0: begin // 【修复】：第一步随机 m
+                                                // 使用 rand_out[2:0] (0-7)
+                                                if (rand_out[2:0] >= 1 && rand_out[2:0] <= 5) begin
+                                                    temp_m <= rand_out[2:0];
+                                                    send_phase <= 1; // 成功，下一步去随机 n
+                                                end else begin
+                                                    // 如果随机数无效，计入重试，防止运气太差卡死
+                                                    rand_retry_cnt <= rand_retry_cnt + 1;
+                                                end
+                                            end
+                                            
+                                            1: begin // 【修复】：第二步随机 n (随机数已在上一拍更新)
+                                                if (rand_out[2:0] >= 1 && rand_out[2:0] <= 5) begin
+                                                    temp_n <= rand_out[2:0];
+                                                    send_phase <= 2; // 成功，去查询
+                                                end else begin
+                                                    rand_retry_cnt <= rand_retry_cnt + 1;
+                                                end
+                                            end
+                                            
+                                            2: begin // 查询存储是否存在
+                                                query_m <= temp_m;
+                                                query_n <= temp_n; 
+                                                send_phase <= 3;
+                                            end
+                                            
+                                            3: begin // 检查结果
+                                                if (query_count > 0) begin
+                                                    // === 找到存在的矩阵 A ===
+                                                    sel_m_a <= temp_m[2:0];
+                                                    sel_n_a <= temp_n[2:0];
+                                                    
+                                                    // 随机选槽位
+                                                    if (query_count == 1) sel_slot_a <= query_slot0_valid ? 0 : 1;
+                                                    else sel_slot_a <= rand_out[0];
+                                                    
+                                                    // 准备 A 的回显信息
+                                                    echo_m <= temp_m;
+                                                    echo_n <= temp_n;
+                                                    echo_slot <= (query_count == 1) ? (query_slot0_valid ? 0 : 1) : rand_out[0];
+
+                                                    // === 根据运算模式决定下一步 ===
+                                                    if (op_mode == 2'b01) begin // 转置：只需 A 存在即可
+                                                        op_sel_a_done <= 1;
+                                                        next_sub_state <= S_OP_CHECK;
+                                                        send_phase <= 0;
+                                                        sub_state <= S_ECHO_PREP;
+                                                    end
+                                                    else if (op_mode == 2'b10) begin // 标量乘：只需 A 存在
+                                                        op_sel_a_done <= 1;
+                                                        scalar_value <= {4'b0, rand_out}; // 随机生成标量
+                                                        next_sub_state <= S_OP_CHECK;
+                                                        send_phase <= 0;
+                                                        sub_state <= S_ECHO_PREP;
+                                                    end
+                                                    else begin 
+                                                        // 加法或乘法：必须去搜 B
+                                                        send_phase <= 0;
+                                                        sub_state <= S_RAND_SEARCH_B; 
+                                                    end
+                                                end else begin
+                                                    // 该维度没有矩阵，重试，从头(阶段0)开始重新随机 m
+                                                    rand_retry_cnt <= rand_retry_cnt + 1;
+                                                    send_phase <= 0; 
+                                                end
+                                            end
+                                        endcase
+                                    end
+                                end
+
+                                // ========================================================
+                                // 随机搜索 B 逻辑 (依赖 A 的维度)
+                                // ========================================================
+                                S_RAND_SEARCH_B: begin
+                                    rand_enable <= 1;
+                                    
+                                    // 如果在这里卡太久，也超时退出
+                                    if (rand_retry_cnt > 250) begin
+                                        error_led <= 1;
+                                        send_phase <= 0;
+                                        sub_state <= S_OP_SHOW_INFO;
+                                    end else begin
+                                    
+                                        case (send_phase)
+                                            0: begin
+                                                // 根据运算规则设定 B 的目标维度
+                                                if (op_mode == 2'b00) begin // === 加法 ===
+                                                    // 规则：B 的维度必须等于 A
+                                                    temp_m <= sel_m_a;
+                                                    temp_n <= sel_n_a; 
+                                                    send_phase <= 1;
+                                                end 
+                                                else begin // === 乘法 ===
+                                                    // 规则：B.row (m) 必须等于 A.col (n)
+                                                    temp_m <= sel_n_a; // B 的行 = A 的列
+                                                    
+                                                    // B 的列 (n) 可以是任意 1-5，随机生成
+                                                    if (rand_out[2:0] >= 1 && rand_out[2:0] <= 5) begin
+                                                        temp_n <= rand_out[2:0];
+                                                        send_phase <= 1;
+                                                    end
+                                                end
+                                            end
+                
+                                            1: begin // 查询 B 是否存在
+                                                query_m <= temp_m;
+                                                query_n <= temp_n; 
+                                                send_phase <= 2; 
+                                            end
+                                            
+                                            2: begin // 检查结果
+                                                if (query_count > 0) begin
+                                                    // === 找到合法的 B！ ===
+                                                    
+                                                    // 1. 设置 B 参数
+                                                    sel_m_b <= temp_m[2:0];
+                                                    sel_n_b <= temp_n[2:0];
+                                                    if (query_count == 1) sel_slot_b <= query_slot0_valid ? 0 : 1;
+                                                    else sel_slot_b <= rand_out[0];
+
+                                                    // 2. 锁定 A 和 B
+                                                    op_sel_a_done <= 1;
+                                                    selecting_second <= 0; // 结束选择
+                                                    echo_m <= temp_m;
+                                                    echo_n <= temp_n;
+                                                    echo_slot <= (query_count == 1) ? (query_slot0_valid ? 0 : 1) : rand_out[0];
+                                                    
+                                                    next_sub_state <= S_OP_CHECK; // 打印完去检查计算
+                                                    send_phase <= 0;
+                                                    sub_state <= S_ECHO_PREP; // 打印 B
+                                                    
+                                                end else begin
+                                                    rand_retry_cnt <= rand_retry_cnt + 1;
+                                                    send_phase <= 0;
+                                                    sub_state <= S_RAND_SEARCH_A; // 【关键】回退去搜一个新的 A
+                                                end
+                                            end
+                                        endcase
+                                    end
+                                end
+
+                                // ========================================================
+                                // 【新增】通用回显打印逻辑
+                                // ========================================================
+                                S_ECHO_PREP: begin
+                                    disp_rd_m <= echo_m; disp_rd_n <= echo_n;
+                                    disp_rd_slot <= echo_slot;
+                                    disp_rd_row <= 0; disp_rd_col <= 0;
+                                    send_phase <= 0; sub_state <= S_ECHO_PRINT;
+                                end
                                 
+                                S_ECHO_PRINT: begin
+                                    // 【修复核心】：移除外层的 if (!tx_busy)，防止因等待忙信号而错过 RAM 的 valid 脉冲
+                                    case (send_phase)
+                                        0: begin 
+                                            // 发送初始换行，需等待空闲
+                                            if (!tx_busy) begin 
+                                                tx_data <= 8'h0A;
+                                                tx_data_valid <= 1; 
+                                                send_phase <= 1; 
+                                            end 
+                                        end
+                                        
+                                        1: begin 
+                                            // 发起读请求（不依赖 tx_busy）
+                                            disp_rd_en <= 1;
+                                            send_phase <= 2; 
+                                        end 
+                                        
+                                        2: begin 
+                                            // 结束读请求
+                                            disp_rd_en <= 0;
+                                            send_phase <= 3; 
+                                        end 
+                                        
+                                        3: begin 
+                                            // 【关键】：立即捕获数据，不要等待 tx_busy！
+                                            // 如果此时等待 busy，valid 脉冲就会溜走导致死锁
+                                            if (disp_rd_valid) begin 
+                                                // 将数据暂存到 buffer
+                                                if (disp_rd_elem > 9) tx_buffer <= "?"; // 简单保护
+                                                else tx_buffer <= disp_rd_elem + 8'h30;
+                                                
+                                                send_phase <= 4; // 捕获成功，去发送
+                                            end 
+                                        end
+                                        
+                                        4: begin 
+                                            // 将暂存的数据发送出去（此时才检查忙信号）
+                                            if (!tx_busy) begin
+                                                tx_data <= tx_buffer;
+                                                tx_data_valid <= 1; 
+                                                send_phase <= 5; 
+                                            end
+                                        end
+                                        
+                                        5: begin // 打印空格或换行 CR
+                                            if (!tx_busy) begin
+                                                if (disp_rd_col + 1 < disp_rd_n) begin
+                                                    tx_data <= 8'h20; // 空格
+                                                    tx_data_valid <= 1;
+                                                    disp_rd_col <= disp_rd_col + 1; 
+                                                    send_phase <= 1; // 回去读下一个列
+                                                end else begin
+                                                    tx_data <= 8'h0D; // CR
+                                                    tx_data_valid <= 1; 
+                                                    send_phase <= 6;
+                                                end
+                                            end
+                                        end
+        
+                                        6: begin // 行末 LF
+                                            if (!tx_busy) begin
+                                                tx_data <= 8'h0A; // LF
+                                                tx_data_valid <= 1;
+                                                disp_rd_col <= 0;
+                                                if (disp_rd_row + 1 < disp_rd_m) begin
+                                                    disp_rd_row <= disp_rd_row + 1;
+                                                    send_phase <= 1; // 下一行
+                                                end else begin
+                                                    send_phase <= 7; // 矩阵打印完成
+                                                end
+                                            end
+                                        end
+                                        
+                                        7: begin 
+                                            send_phase <= 0; 
+                                            sub_state <= next_sub_state; 
+                                        end
+                                    endcase
+                                end                                
                                 S_OP_GET_SCALAR: begin
                                     // 直接使用拨码开关输入标量值 (0-15)
                                     scalar_value <= scalar_input;
