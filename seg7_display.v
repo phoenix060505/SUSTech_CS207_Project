@@ -175,17 +175,19 @@ module seg7_display (
                 dig_sel = 8'b0000_0000;
             end
 
-            3'd6: begin // DN1_K3 - 倒计时个位
-                if (countdown_active) begin
+            3'd6: begin // DN1_K3 (DK7) - 现在要求显示【十位】
+                // 逻辑：如果是十位，且数值大于0才显示（高位消隐），或者你希望0也显示就去掉 && countdown_tens > 0
+                if (countdown_active && countdown_tens > 0) begin
                     dig_sel = 8'b0100_0000;
-                    seg1 = digit_to_seg(countdown_ones);
+                    seg1 = digit_to_seg(countdown_tens); // 这里改成 countdown_tens
                 end
             end
 
-            3'd7: begin // DN1_K4 - 倒计时十位
-                if (countdown_active && countdown_tens > 0) begin
+            3'd7: begin // DN1_K4 (DK8) - 现在要求显示【个位】
+                // 逻辑：个位始终显示
+                if (countdown_active) begin
                     dig_sel = 8'b1000_0000;
-                    seg1 = digit_to_seg(countdown_tens);
+                    seg1 = digit_to_seg(countdown_ones); // 这里改成 countdown_ones
                 end
             end
         endcase

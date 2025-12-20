@@ -200,6 +200,8 @@ module fsm_full (
     reg [7:0]  rand_retry_cnt;   // 随机重试计数器
     reg [3:0]  echo_m, echo_n;   // 待回显矩阵的维度
     reg        echo_slot;        // 待回显矩阵的槽位
+    // check临时变量
+    reg check_pass;
     // 主状态输出
     always @(*) begin
         main_state_out = main_state;
@@ -254,7 +256,7 @@ module fsm_full (
             error_led <= 0;
             countdown_val <= 0;
             countdown_active <= 0;
-            countdown_cfg <= 5'd10;  // 默认10秒
+            countdown_cfg <= 5'd30;  // 默认30秒
             countdown_timer <= 0;
             countdown_sec <= 0;
             input_timeout_timer <= 0;
@@ -726,6 +728,40 @@ module fsm_full (
                     // 展示/运算模式
                     // =============================================
                     MAIN_DISPLAY: begin
+                        if (countdown_active) begin
+                            // 【修复】实时同步数值到输出端口，否则数码管永远显示0
+                            countdown_val <= countdown_sec; 
+
+                            // 1. 计数器递减
+                            if (countdown_timer >= 100_000_000 - 1) begin
+                                countdown_timer <= 0;
+                                if (countdown_sec > 0) begin
+                                    countdown_sec <= countdown_sec - 1;
+                                end else begin
+                                    // === 超时处理 ===
+                                    // 【修复】超时后跳回 S_OP_SHOW_INFO，重新打印矩阵列表 (2 2*2*2...)
+                                    // 这样能给用户明确的“重置”反馈
+                                    sub_state <= S_OP_SHOW_INFO; 
+                                    send_phase <= 0; // 【关键】重置打印阶段计数器
+
+                                    // 重置所有选择标志
+                                    op_sel_a_done <= 0;
+                                    selecting_second <= 0;
+                                    op_dim_ready <= 0;
+                                    op_listed_once <= 0;
+                                    
+                                    // 【修复】超时了就停止倒计时，并熄灭错误灯，恢复平静状态
+                                    countdown_active <= 0; 
+                                    error_led <= 0;
+                                    
+                                    // 重置时间以便下次使用
+                                    countdown_sec <= countdown_cfg;
+                                    countdown_val <= countdown_cfg; // 同步更新显示值
+                                end
+                            end else begin
+                                countdown_timer <= countdown_timer + 1;
+                            end
+                        end
                         if (func_sel == 2'b10) begin
                             // ========== 展示模式 ==========
                             led_status <= 2'b01;
@@ -1692,103 +1728,50 @@ module fsm_full (
                                 end
                                 
                                 S_OP_CHECK: begin
-                                    // 检查运算数合法性
+                                    // 默认进入计算状态的标志
+                                    check_pass = 0;
+
+                                    // 1. 检查逻辑
                                     case (op_mode)
-                                        2'b00: begin  // 加法：维度必须相同
-                                            if (sel_m_a == sel_m_b && sel_n_a == sel_n_b) begin
-                                                sub_state <= S_OP_CALC;
-                                                error_led <= 0;
-                                            end else begin
-                                                error_led <= 1;
-                                                countdown_sec <= countdown_cfg;
-                                                countdown_timer <= 0;
-                                                countdown_active <= 1;
-                                                sub_state <= S_OP_COUNTDOWN;
-                                            end
-                                        end
-                                        2'b01: begin  // 转置：总是合法
-                                            sub_state <= S_OP_CALC;
-                                        end
-                                        2'b10: begin  // 标量乘：总是合法
-                                            sub_state <= S_OP_CALC;
-                                        end
-                                        2'b11: begin  // 矩阵乘：A的列数=B的行数
-                                            if (sel_n_a == sel_m_b) begin
-                                                sub_state <= S_OP_CALC;
-                                                error_led <= 0;
-                                            end else begin
-                                                error_led <= 1;
-                                                countdown_sec <= countdown_cfg;
-                                                countdown_timer <= 0;
-                                                countdown_active <= 1;
-                                                sub_state <= S_OP_COUNTDOWN;
-                                            end
-                                        end
+                                        2'b00: if (sel_m_a == sel_m_b && sel_n_a == sel_n_b) check_pass = 1; // 加法
+                                        2'b01: check_pass = 1; // 转置
+                                        2'b10: check_pass = 1; // 标量
+                                        2'b11: if (sel_n_a == sel_m_b) check_pass = 1; // 乘法
                                     endcase
+
+                                    // 2. 结果处理
+                                    if (check_pass) begin
+                                        // === 成功 ===
+                                        // 无论之前是否在倒计时，现在都算成功，解除所有警报
+                                        sub_state <= S_OP_CALC;
+                                        error_led <= 0;
+                                        countdown_active <= 0; // 【关键】成功后停止倒计时
+                                    end else begin
+                                        // === 失败 ===
+                                        // 维度不匹配，激活倒计时模式，让用户限时重选
+                                        error_led <= 1;
+                                        // 【修改】无论当前是否已经在倒计时，只要输错，就强制重置时间为30秒
+                                        // 去掉了 if (!countdown_active) 的判断
+                                        countdown_sec <= countdown_cfg;   // 重置秒数
+                                        countdown_val <= countdown_cfg;   // 【关键】同步更新显示值，让用户立刻看到变回30
+                                        countdown_timer <= 0;             // 重置毫秒计数器
+                                        countdown_active <= 1;            // 确保倒计时激活
+                                        
+                                        // 彻底清空当前选择，让用户从选维度 M 开始
+                                        op_sel_a_done <= 0;
+                                        selecting_second <= 0;
+                                        op_dim_ready <= 0;
+                                        op_listed_once <= 0;
+                                        
+                                        // 直接跳回维度选择，而不是去 S_OP_COUNTDOWN
+                                        sub_state <= S_OP_SEL_DIM_M; 
+                                    end
                                 end
                                 
                                 S_OP_COUNTDOWN: begin
-                                    countdown_val <= countdown_sec;
-                                    
-                                    // 1秒计数
-                                    if (countdown_timer >= 100_000_000 - 1) begin
-                                        countdown_timer <= 0;
-                                        if (countdown_sec > 0) begin
-                                            countdown_sec <= countdown_sec - 1;
-                                        end else begin
-                                            // 超时，返回重选运算数
-                                            countdown_active <= 0;
-                                            error_led <= 0;
-                                            selecting_second <= 0;
-                                            op_sel_a_done <= 0;
-                                            op_dim_ready <= 0;
-                                            op_listed_once <= 0;
-                                            sub_state <= S_OP_SEL_DIM_M;
-                                        end
-                                    end else begin
-                                        countdown_timer <= countdown_timer + 1;
-                                    end
-                                    
-                                    // 倒计时期间允许通过UART重新输入运算数编号 (ASCII '1'-'2')
-                                    if (uart_rx_done) begin
-                                        if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h32) begin
-                                            // 重新选择运算数 ('1'->slot 0, '2'->slot 1)
-                                            if (!op_sel_a_done) begin
-                                                sel_slot_a <= uart_rx_data[0] - 1; // '1'->0, '2'->1
-                                                sel_m_a   <= sel_dim_m[2:0];
-                                                sel_n_a   <= sel_dim_n[2:0];
-                                                op_sel_a_done <= 1;
-                                                // 根据运算类型决定下一步
-                                                case (op_mode)
-                                                    2'b01: begin  // 转置：只需1个
-                                                        sub_state <= S_OP_CHECK;
-                                                        countdown_active <= 0;
-                                                    end
-                                                    2'b10: begin  // 标量乘：需要标量
-                                                        sub_state <= S_OP_GET_SCALAR;
-                                                        countdown_active <= 0;
-                                                    end
-                                                    default: begin  // 加法/矩阵乘：需要第二个
-                                                        selecting_second <= 1;
-                                                    end
-                                                endcase
-                                            end else if (selecting_second) begin
-                                                sel_slot_b <= uart_rx_data[0] - 1; // '1'->0, '2'->1
-                                                sel_m_b   <= sel_dim_m[2:0];
-                                                sel_n_b   <= sel_dim_n[2:0];
-                                                selecting_second <= 0;
-                                                // 收齐后重新检查
-                                                sub_state <= S_OP_CHECK;
-                                                countdown_active <= 0;
-                                            end
-                                            error_led <= 0;
-                                        end else if (uart_rx_data >= 8'h35 && uart_rx_data <= 8'h39) begin
-                                            // 配置倒计时时间 ASCII '5'-'9' -> 5~9秒
-                                            countdown_cfg <= uart_rx_data - 8'h30;
-                                        end else if (uart_rx_data == 8'h31 && uart_rx_data == 8'h30) begin
-                                            // '10' 需要两位，暂不支持，保持默认
-                                        end
-                                    end
+                                    // 该状态已废弃，逻辑已移至 MAIN_DISPLAY 的全局倒计时中
+                                    // 为了安全，如果意外进入此状态，直接跳回开始
+                                    sub_state <= S_OP_SEL_DIM_M;
                                 end
                                 
                                 S_OP_CALC: begin
