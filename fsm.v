@@ -1885,6 +1885,7 @@ module fsm_full (
                                             sub_state <= S_CALC_CONV_INPUT;
                                             send_phase <= 0;
                                             elem_count <= 0;
+                                            conv_start <= 1;
                                         end
                                     end
                                 end

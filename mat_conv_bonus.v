@@ -101,7 +101,6 @@ module mat_conv_bonus #(
             rom_y         <= 0;
         end else begin
             // defaults
-            done       <= 0;
             out_valid  <= 0;
             out_row_end<= 0;
             out_last   <= 0;
@@ -114,6 +113,7 @@ module mat_conv_bonus #(
             case (state)
                 ST_IDLE: begin
                     busy         <= 0;
+                    done         <= 0;
                     cycle_count  <= 0;
                     if (start) begin
                         kernel_count <= 0;
@@ -216,7 +216,9 @@ module mat_conv_bonus #(
                 ST_DONE: begin
                     // Hold cycle_count for external display until next start
                     if (start) begin
+                        done         <= 0;
                         kernel_count <= 0;
+                        cycle_count  <= 0;
                         state        <= ST_LOAD;
                     end
                 end
