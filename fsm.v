@@ -150,6 +150,7 @@ module fsm_full (
     localparam S_ECHO_PREP     = 6'd36; // 准备回显
     localparam S_ECHO_PRINT    = 6'd37; // 执行回显打印
     localparam S_ECHO_SCALAR   = 6'd38; // 回显标量值
+    localparam S_PREP_PRINT_B  = 6'd39; // 准备打印 B 矩阵
     // =========================================================
     // 寄存器定义
     // =========================================================
@@ -1369,75 +1370,70 @@ module fsm_full (
                                     end
                                 end
                                 // ========================================================
-                                // 随机搜索 A 逻辑 (修复：随机起点+线性扫描，确保必中)
+                                // 随机搜索 A 逻辑 
                                 // ========================================================
                                 S_RAND_SEARCH_A: begin
-                                    rand_enable <= 1; // 保持随机数生成
-                                    
-                                    // 全局超时保护 (防止死循环)
+                                    rand_enable <= 1;
+                                    // 全局超时保护：找不到匹配矩阵，放弃并返回维度选择
                                     if (rand_retry_cnt > 200) begin
-                                        error_led <= 1;
-                                        send_phase <= 0;
-                                        sub_state <= S_OP_SHOW_INFO;
-                                    end else begin
+                                        error_led <= 1;   // 亮红灯，表示“刚才那次自动搜索失败了”
+    
+                                        // 概览页面打印完总数后，会自动跳去 S_OP_SEL_DIM_M 让用户输入
+                                        sub_state <= S_OP_SHOW_INFO; 
                                         
+                                        send_phase <= 0;  // 必须清零，因为 SHOW_INFO 是从 phase 0 开始运行的
+                                    end else begin
                                         case (send_phase)
-                                            0: begin // === 步骤1: 确定随机扫描起点 ===
-                                                // rand_out 是 4位 (0-15)，取模5得到 0-4，+1得到 1-5
+                                            0: begin 
                                                 temp_m <= (rand_out % 5) + 1;
                                                 send_phase <= 1;
                                             end
-
-                                            1: begin // 错开一拍再取 n，增加随机性
+                                            1: begin 
                                                 temp_n <= (rand_out % 5) + 1;
-                                                // elem_count 用作“本次扫描过的组合数”，防止无限绕圈
-                                                elem_count <= 0; 
+                                                elem_count <= 0;
                                                 send_phase <= 2;
                                             end
-                                            
-                                            2: begin // === 步骤2: 查询当前维度 ===
+                                            2: begin 
                                                 query_m <= temp_m;
                                                 query_n <= temp_n; 
                                                 send_phase <= 3;
                                             end
-                                            
-                                            3: begin // === 步骤3: 检查结果 ===
+                                            3: begin 
                                                 if (query_count > 0) begin
                                                     // >>> 找到了存在的矩阵 A <<<
                                                     sel_m_a <= temp_m[2:0];
                                                     sel_n_a <= temp_n[2:0];
                                                     
-                                                    // 随机选槽位
                                                     if (query_count == 1) sel_slot_a <= query_slot0_valid ? 0 : 1;
                                                     else sel_slot_a <= rand_out[0];
                                                     
-                                                    // 准备 A 的回显信息
+                                                    // 准备 A 的回显信息 (如果是单操作数，立即打印；双操作数则暂缓)
                                                     echo_m <= temp_m;
                                                     echo_n <= temp_n;
                                                     echo_slot <= (query_count == 1) ? (query_slot0_valid ? 0 : 1) : rand_out[0];
 
-                                                    // >>> 决定打印完 A 之后去哪 <<<
                                                     if (op_mode == 2'b01) begin // [转置]
                                                         op_sel_a_done <= 1;
-                                                        next_sub_state <= S_OP_CHECK; // 打印完A -> 去检查
+                                                        next_sub_state <= S_OP_CHECK; 
+                                                        send_phase <= 0;
+                                                        sub_state <= S_ECHO_PREP; // 单操作数，直接打印
                                                     end
                                                     else if (op_mode == 2'b10) begin // [标量乘]
                                                         op_sel_a_done <= 1;
-                                                        scalar_value <= {4'b0, rand_out}; // 随机标量
-                                                        next_sub_state <= S_ECHO_SCALAR; // 【关键】打印完A -> 去打印标量
+                                                        scalar_value <= {4'b0, rand_out}; // LFSR已限制为0-9，无需取模
+                                                        next_sub_state <= S_ECHO_SCALAR;
+                                                        send_phase <= 0;
+                                                        sub_state <= S_ECHO_PREP; // 单操作数，直接打印
                                                     end
                                                     else begin // [加法/乘法]
-                                                        // 还没结束，不要置 done
-                                                        next_sub_state <= S_RAND_SEARCH_B; // 【关键】打印完A -> 去搜B
+                                                        // 【修改2】双操作数模式：找到A后先憋着不打印，直接去搜B
+                                                        // 防止搜B失败重试时，屏幕上打印一堆废弃的A
+                                                        send_phase <= 0;
+                                                        sub_state <= S_RAND_SEARCH_B; 
                                                     end
-                                                    
-                                                    // >>> 立即出发去打印 A <<<
-                                                    send_phase <= 0;
-                                                    sub_state <= S_ECHO_PREP;
 
                                                 end else begin
-                                                    // >>> 没找到，扫描下一个维度 <<<
-                                                    // 逻辑：N+1，如果溢出则M+1，遍历所有 5x5=25 种组合
+                                                    // 没找到，继续扫描 (原有逻辑保持不变)
                                                     if (temp_n < 5) temp_n <= temp_n + 1;
                                                     else begin
                                                         temp_n <= 1;
@@ -1445,15 +1441,12 @@ module fsm_full (
                                                         else temp_m <= 1;
                                                     end
                                                     
-                                                    // 计数保护
                                                     elem_count <= elem_count + 1;
                                                     if (elem_count > 26) begin
-                                                        // 扫描了一整圈还没找到？说明存储器是空的，或者运气极差
-                                                        // 增加全局重试计数，重新随机个起点再试
-                                                        rand_retry_cnt <= rand_retry_cnt + 20; 
+                                                        rand_retry_cnt <= rand_retry_cnt + 20;
                                                         send_phase <= 0; 
                                                     end else begin
-                                                        send_phase <= 2; // 继续查下一个
+                                                        send_phase <= 2;
                                                     end
                                                 end
                                             end
@@ -1462,81 +1455,79 @@ module fsm_full (
                                 end
 
                                 // ========================================================
-                                // 随机搜索 B 逻辑 (依赖 A，同样支持扫描)
+                                // 随机搜索 B 逻辑
                                 // ========================================================
                                 S_RAND_SEARCH_B: begin
                                     rand_enable <= 1;
-                                    
+                                    // 【修改3】超时跳转回维度选择
                                     if (rand_retry_cnt > 200) begin
-                                        error_led <= 1;
-                                        sub_state <= S_OP_SHOW_INFO;
+                                        error_led <= 1;   // 亮红灯
+                                            sub_state <= S_OP_SHOW_INFO;
+                                        
+                                        send_phase <= 0;  // 重置相位
                                     end else begin
-                                    
                                         case (send_phase)
                                             0: begin // === 步骤1: 设定 B 的目标 ===
-                                                if (op_mode == 2'b00) begin // [加法] B 维度必须等于 A
+                                                if (op_mode == 2'b00) begin // [加法]
                                                     temp_m <= sel_m_a;
                                                     temp_n <= sel_n_a;
-                                                    // 加法不需要扫描，直接去查是否存在
-                                                    send_phase <= 4; 
+                                                    send_phase <= 4;
                                                 end 
-                                                else begin // [乘法] B行=A列，B列随机扫描
-                                                    temp_m <= sel_n_a; // 固定行
-                                                    temp_n <= (rand_out % 5) + 1; // 随机列起点
-                                                    elem_count <= 0; // 本地扫描计数
+                                                else begin // [乘法]
+                                                    temp_m <= sel_n_a; // B行 = A列
+                                                    temp_n <= (rand_out % 5) + 1;
+                                                    elem_count <= 0;
                                                     send_phase <= 1;
                                                 end
                                             end
-                
+
                                             // --- 乘法扫描逻辑 ---
-                                            1: begin // 查询
+                                            1: begin 
                                                 query_m <= temp_m;
                                                 query_n <= temp_n; 
-                                                send_phase <= 2; 
+                                                send_phase <= 2;
                                             end
                                             
-                                            2: begin // 检查结果
+                                            2: begin 
                                                 if (query_count > 0) begin
                                                     // >> 找到 B 了 <<
                                                     sel_m_b <= temp_m[2:0];
                                                     sel_n_b <= temp_n[2:0];
                                                     if (query_count == 1) sel_slot_b <= query_slot0_valid ? 0 : 1;
                                                     else sel_slot_b <= rand_out[0];
-
+                                                    
                                                     op_sel_a_done <= 1;
                                                     selecting_second <= 0; 
                                                     
-                                                    // 准备 B 的回显信息
-                                                    echo_m <= temp_m;
-                                                    echo_n <= temp_n;
-                                                    echo_slot <= (query_count == 1) ? (query_slot0_valid ? 0 : 1) : rand_out[0];
+                                                    // 【修改4】配对成功！现在开始依次打印
+                                                    // 第一步：先打印 A (利用之前存在 sel_..._a 中的值)
+                                                    echo_m <= sel_m_a;
+                                                    echo_n <= sel_n_a;
+                                                    echo_slot <= sel_slot_a;
                                                     
-                                                    // >>> 决定打印完 B 之后去哪 <<<
-                                                    next_sub_state <= S_OP_CHECK; // 打印完B -> 去检查计算
+                                                    // 打印完 A 之后，跳转到 S_PREP_PRINT_B 去准备打印 B
+                                                    next_sub_state <= S_PREP_PRINT_B;
                                                     
-                                                    // >>> 立即出发去打印 B <<<
                                                     send_phase <= 0;
-                                                    sub_state <= S_ECHO_PREP;
+                                                    sub_state <= S_ECHO_PREP; // 立即出发去打印 A
                                                 end else begin
-                                                    // >> 没找到，换下一列 <<
+                                                    // 没找到，换下一列 (原有逻辑保持不变)
                                                     if (temp_n < 5) temp_n <= temp_n + 1;
                                                     else temp_n <= 1;
                                                     
                                                     elem_count <= elem_count + 1;
                                                     if (elem_count > 6) begin
-                                                        // 这一行的所有列都试过了，都没有矩阵
-                                                        // 说明这个 A 是个“死胡同”，没法做乘法
-                                                        // >> 回退到 A 状态，重新选一个 A <<
+                                                        // 此 A 无解，回退换 A
                                                         rand_retry_cnt <= rand_retry_cnt + 5;
                                                         send_phase <= 0;
                                                         sub_state <= S_RAND_SEARCH_A; 
                                                     end else begin
-                                                        send_phase <= 1; // 查下列
+                                                        send_phase <= 1;
                                                     end
                                                 end
                                             end
 
-                                            // --- 加法检查逻辑 (不扫描) ---
+                                            // --- 加法检查逻辑 ---
                                             4: begin
                                                 query_m <= temp_m;
                                                 query_n <= temp_n;
@@ -1545,7 +1536,7 @@ module fsm_full (
                                             
                                             5: begin
                                                 if (query_count > 0) begin
-                                                    // 找到 B
+                                                    // 加法配对成功
                                                     sel_m_b <= temp_m[2:0];
                                                     sel_n_b <= temp_n[2:0];
                                                     if (query_count == 1) sel_slot_b <= query_slot0_valid ? 0 : 1;
@@ -1554,16 +1545,20 @@ module fsm_full (
                                                     op_sel_a_done <= 1;
                                                     selecting_second <= 0;
                                                     
-                                                    echo_m <= temp_m;
-                                                    echo_n <= temp_n;
-                                                    echo_slot <= (query_count == 1) ? (query_slot0_valid ? 0 : 1) : rand_out[0];
+                                                    // 【修改5】同乘法，先打印 A
+                                                    echo_m <= sel_m_a;
+                                                    echo_n <= sel_n_a;
+                                                    echo_slot <= sel_slot_a;
                                                     
-                                                    next_sub_state <= S_OP_CHECK;
+                                                    next_sub_state <= S_PREP_PRINT_B; // 之后去打印 B
                                                     send_phase <= 0;
                                                     sub_state <= S_ECHO_PREP;
                                                 end else begin
-                                                    error_led <= 1;
-                                                    sub_state <= S_OP_SHOW_INFO;
+                                                    // 【修改6】加法如果找不到同维度的 B，不要直接报错
+                                                    // 而是认为这个 A 不行，回去重新随机一个 A
+                                                    rand_retry_cnt <= rand_retry_cnt + 5;
+                                                    send_phase <= 0;
+                                                    sub_state <= S_RAND_SEARCH_A;
                                                 end
                                             end
                                         endcase
@@ -1705,6 +1700,22 @@ module fsm_full (
                                              send_phase <= 0;
                                         end
                                     endcase
+                                end
+                                // ========================================================
+                                // 准备打印 B
+                                // ========================================================
+                                S_PREP_PRINT_B: begin
+                                    // 将寄存器中 B 的信息加载到回显接口
+                                    echo_m <= sel_m_b;
+                                    echo_n <= sel_n_b;
+                                    echo_slot <= sel_slot_b;
+                                    
+                                    // 打印完 B 之后，进入检查/计算状态
+                                    next_sub_state <= S_OP_CHECK;
+                                    
+                                    // 开始打印
+                                    send_phase <= 0;
+                                    sub_state <= S_ECHO_PREP;
                                 end                           
                                 S_OP_GET_SCALAR: begin
                                     // 直接使用拨码开关输入标量值 (0-15)
