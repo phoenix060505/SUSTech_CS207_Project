@@ -29,7 +29,6 @@ module matrix_storage #(
     output reg                      input_done
 );
 
-    // 强制使用 Block RAM
     (* ram_style = "block" *)
     reg [ELEM_WIDTH-1:0] matrix_mem [0:TOTAL_SLOTS-1][0:MAX_DIM-1][0:MAX_DIM-1];
     
@@ -103,7 +102,7 @@ module matrix_storage #(
                     dim_slot_valid[wen_dim_combo][fifo_ptr[wen_dim_combo]] <= 1'b1;
                     fifo_ptr[wen_dim_combo] <= ~fifo_ptr[wen_dim_combo];
                     
-                    // 【关键修复】这里千万不要用 for 循环清空 matrix_mem！
+                    // 这里千万不要用 for 循环清空 matrix_mem！
                     // 直接覆盖旧数据即可，dim_slot_valid 会保证读取安全。
                 end
             end

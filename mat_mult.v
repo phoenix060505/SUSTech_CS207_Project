@@ -115,7 +115,6 @@ module mat_mult #(
                 S_INIT_ROW: j_cnt <= 0;
                 S_INIT_COL: begin k_cnt <= 0; accumulator <= 0; end
                 
-                // --- 修复点：拆分 PRE 和 WAIT ---
                 S_PRE_A: begin
                     rd_en <= 0; // 地址建立，使能拉低
                     rd_slot_idx <= slot_a_latched;

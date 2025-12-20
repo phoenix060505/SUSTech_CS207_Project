@@ -1,5 +1,3 @@
-// 完整FSM状态机 - 支持矩阵输入/生成/展示/运算的全流程
-// 更新：支持按维度分组的矩阵存储（每种维度最多2个）
 module fsm_full (
     input  wire        clk,
     input  wire        rst_n,
@@ -31,7 +29,7 @@ module fsm_full (
     input  wire        query_slot0_valid, // 槽0是否有效
     input  wire        query_slot1_valid, // 槽1是否有效
     
-    // 存储读取接口 (用于展示) - 需要指定维度
+    // 存储读取接口 - 需要指定维度
     output reg         disp_rd_en,
     output reg         disp_rd_slot,
     output reg  [2:0]  disp_rd_row,
@@ -60,7 +58,7 @@ module fsm_full (
     input  wire        scalar_busy,
     input  wire        matmul_busy,
     
-    // Bonus Convolution
+    // 卷积模块接口
     output reg         conv_start,
     output reg         conv_kernel_valid,
     output reg  [3:0]  conv_kernel_in,
@@ -94,7 +92,7 @@ module fsm_full (
     localparam MAIN_MENU     = 2'd0;
     localparam MAIN_INPUT    = 2'd1;
     localparam MAIN_GENERATE = 2'd2;
-    localparam MAIN_DISPLAY  = 2'd3;  // 也用于运算模式
+    localparam MAIN_DISPLAY  = 2'd3;
     
     // =========================================================
     // 子状态定义
@@ -187,7 +185,7 @@ module fsm_full (
     // 倒计时
     reg [26:0] countdown_timer; // 1秒计数器 (100MHz)
     reg [4:0]  countdown_sec;   // 倒计时秒数
-    reg [4:0]  countdown_cfg;   // 配置的倒计时时间 (默认10秒)
+    reg [4:0]  countdown_cfg;   // 配置的倒计时时间
     
     // 输入超时检测
     reg [31:0] input_timeout_timer; // 输入超时计数器 (100MHz)
@@ -256,7 +254,7 @@ module fsm_full (
             error_led <= 0;
             countdown_val <= 0;
             countdown_active <= 0;
-            countdown_cfg <= 5'd30;  // 默认30秒
+            countdown_cfg <= 5'd30;
             countdown_timer <= 0;
             countdown_sec <= 0;
             input_timeout_timer <= 0;
@@ -296,7 +294,7 @@ module fsm_full (
             scalar_start <= 0;
             matmul_start <= 0;
             rand_enable <= 0;
-            disp_rd_en <= 0;  // disp_rd_en 作为脉冲信号每周期复位，在需要时设为1
+            disp_rd_en <= 0;
             
             // 返回按钮处理
             if (btn_back && main_state != MAIN_MENU) begin
@@ -333,16 +331,16 @@ module fsm_full (
                                 2'b10: begin
                                     main_state <= MAIN_DISPLAY;
                                     sub_state <= S_DISP_START;
-                                    send_phase <= 100; // 【修改点1】在此处初始化
+                                    send_phase <= 100;
                                 end
                                 2'b11: begin
                                     main_state <= MAIN_DISPLAY;
-                                    // Bonus Convolution Check
+                                    // 卷积模式特殊处理
                                     if (op_mode == 2'b11 && sw8_conv_mode) begin
                                         sub_state <= S_CALC_CONV_INPUT;
                                         send_phase <= 0;
-                                        elem_count <= 0; // Use to count kernel inputs (0..8)
-                                        conv_start <= 1; // Pulse start to reset convolution module
+                                        elem_count <= 0; // 卷积输入元素计数清零
+                                        conv_start <= 1; // 启动卷积模块
                                     end else begin
                                         sub_state <= S_OP_SHOW_INFO;
                                         send_phase <= 0; 
@@ -419,7 +417,7 @@ module fsm_full (
                                 end
                             end
                             
-                            // 新增：先设置维度，让存储模块计算好地址
+                            //设置维度
                             S_IN_SET_DIM: begin
                                 // 检查是否有维度错误
                                 if (error_led) begin
@@ -448,7 +446,6 @@ module fsm_full (
                                 end
                             end
                             
-                            // 替换 fsm.v 中 S_IN_RX_DATA 的部分
                             S_IN_RX_DATA: begin
                                 // --------------------------------------------------------
                                 // 1. 全局计时器逻辑：无数据接收时一直计数，有数据则清零
@@ -537,7 +534,7 @@ module fsm_full (
                                 end
                                 
                                 // --------------------------------------------------------
-                                // 4. 完成检测 (最高优先级)
+                                // 4. 完成检测
                                 // --------------------------------------------------------
                                 if (elem_count >= total_elems) begin
                                     sub_state <= S_IN_DONE;
@@ -664,7 +661,7 @@ module fsm_full (
                                 end
                             end
                             
-                            // 新增：先设置维度
+                            // 先设置维度
                             S_GEN_SET_DIM: begin
                                 // 检查是否有错误
                                 if (error_led) begin
@@ -712,7 +709,7 @@ module fsm_full (
                             S_GEN_DONE: begin
                                 led_status <= 2'b11; // 完成状态指示
                                 
-                                // 【新增】按下确认键，重新开始生成流程
+                                // 按下确认键，重新开始生成流程
                                 if (btn_start) begin
                                     error_led <= 0;
                                     input_timeout_timer <= 0;
@@ -729,7 +726,7 @@ module fsm_full (
                     // =============================================
                     MAIN_DISPLAY: begin
                         if (countdown_active) begin
-                            // 【修复】实时同步数值到输出端口，否则数码管永远显示0
+                            // 实时同步数值到输出端口
                             countdown_val <= countdown_sec; 
 
                             // 1. 计数器递减
@@ -739,10 +736,8 @@ module fsm_full (
                                     countdown_sec <= countdown_sec - 1;
                                 end else begin
                                     // === 超时处理 ===
-                                    // 【修复】超时后跳回 S_OP_SHOW_INFO，重新打印矩阵列表 (2 2*2*2...)
-                                    // 这样能给用户明确的“重置”反馈
                                     sub_state <= S_OP_SHOW_INFO; 
-                                    send_phase <= 0; // 【关键】重置打印阶段计数器
+                                    send_phase <= 0;
 
                                     // 重置所有选择标志
                                     op_sel_a_done <= 0;
@@ -750,7 +745,6 @@ module fsm_full (
                                     op_dim_ready <= 0;
                                     op_listed_once <= 0;
                                     
-                                    // 【修复】超时了就停止倒计时，并熄灭错误灯，恢复平静状态
                                     countdown_active <= 0; 
                                     error_led <= 0;
                                     
@@ -769,9 +763,7 @@ module fsm_full (
                                 S_DISP_START: begin
                                     // 进入展示模式时先提示输入 m
                                     disp_m <= 0;
-                                    disp_n <= 0;
-                                    // 【修改点2】删除了这里的 send_phase <= 100;
-                                    
+                                    disp_n <= 0;                                    
                                     if (!tx_busy) begin
                                         case (send_phase)
                                             100: begin tx_data <= "I"; tx_data_valid <= 1; send_phase <= 101; end
@@ -971,10 +963,9 @@ module fsm_full (
                                 S_DISP_DONE: begin
                                     led_status <= 2'b11; // 完成状态指示
                                     
-                                    // 【新增】按下确认键，重新开始展示流程
                                     if (btn_start) begin
                                         led_status <= 2'b01; // 切回展示模式状态灯
-                                        send_phase <= 100;   // 【关键】重置发送阶段为初始值(打印提示语)
+                                        send_phase <= 100;   // 重置发送阶段为初始值(打印提示语)
                                         sub_state <= S_DISP_START; // 跳回展示开始状态
                                     end
                                 end
@@ -1127,7 +1118,7 @@ module fsm_full (
                                 S_OP_SEL_DIM_M: begin
                                     // 保持 Error LED 状态（如果之前报错了，进入这里后等待新输入或超时清除）
                                     if (uart_rx_done) begin
-                                        // 【修改】检测 'R' 键触发随机模式
+                                        // 检测 'R' 键触发随机模式
                                         if (uart_rx_data == "R" || uart_rx_data == "r") begin
                                             rand_retry_cnt <= 0;          // 搜索次数计数器清零
                                             rand_enable <= 1;             // 开启随机数
@@ -1185,7 +1176,6 @@ module fsm_full (
                                     
                                     // 读取相关的状态不需要等待 tx_busy，可以独立运行
                                     case (send_phase)
-                                        // === 【新增状态】地址稳定缓冲 ===
                                         35: begin
                                             disp_rd_m <= sel_dim_m;
                                             disp_rd_n <= sel_dim_n;
@@ -1344,12 +1334,11 @@ module fsm_full (
                                                 echo_n <= sel_dim_n;
                                                 echo_slot <= uart_rx_data[0] - 1;
                                                 
-                                                // 【修改核心】：决定回显完去哪
                                                 if (op_mode == 2'b01) next_sub_state <= S_OP_CHECK;      // 转置 -> 检查
                                                 else if (op_mode == 2'b10) next_sub_state <= S_OP_GET_SCALAR; // 标量 -> 输标量
                                                 else if (op_mode == 2'b11) next_sub_state <= S_OP_SEL_DIM_M;  // 乘法 -> 选B维度
                                                 
-                                                // 【修改点】：加法模式(00)，直接去选B (S_OP_SEL_MAT)，不要再展示冗余列表
+                                                // 加法模式(00)，直接去选B (S_OP_SEL_MAT)，不要再展示冗余列表
                                                 else next_sub_state <= S_OP_SEL_MAT; 
 
                                                 if (op_mode == 2'b00 || op_mode == 2'b11) selecting_second <= 1;
@@ -1573,7 +1562,6 @@ module fsm_full (
                                                     send_phase <= 0;
                                                     sub_state <= S_ECHO_PREP;
                                                 end else begin
-                                                    // 加法 A 存在但 B 不存在？(理论上不可能，除非 A 被删了)
                                                     error_led <= 1;
                                                     sub_state <= S_OP_SHOW_INFO;
                                                 end
@@ -1582,7 +1570,7 @@ module fsm_full (
                                     end
                                 end
                                 // ========================================================
-                                // 【新增】通用回显打印逻辑
+                                // 通用回显打印逻辑
                                 // ========================================================
                                 S_ECHO_PREP: begin
                                     disp_rd_m <= echo_m; disp_rd_n <= echo_n;
@@ -1592,7 +1580,7 @@ module fsm_full (
                                 end
                                 
                                 S_ECHO_PRINT: begin
-                                    // 【修复核心】：移除外层的 if (!tx_busy)，防止因等待忙信号而错过 RAM 的 valid 脉冲
+                                    //移除外层的 if (!tx_busy)，防止因等待忙信号而错过 RAM 的 valid 脉冲
                                     case (send_phase)
                                         0: begin 
                                             // 发送初始换行，需等待空闲
@@ -1616,8 +1604,6 @@ module fsm_full (
                                         end 
                                         
                                         3: begin 
-                                            // 【关键】：立即捕获数据，不要等待 tx_busy！
-                                            // 如果此时等待 busy，valid 脉冲就会溜走导致死锁
                                             if (disp_rd_valid) begin 
                                                 // 将数据暂存到 buffer
                                                 if (disp_rd_elem > 9) tx_buffer <= "?"; // 简单保护
@@ -1672,7 +1658,7 @@ module fsm_full (
                                     endcase
                                 end     
                                 // ========================================================
-                                // 【新增】打印标量值 (0-15)
+                                // 打印标量值 (0-15)
                                 // ========================================================
                                 S_ECHO_SCALAR: begin
                                     case (send_phase)
@@ -1750,7 +1736,7 @@ module fsm_full (
                                         // === 失败 ===
                                         // 维度不匹配，激活倒计时模式，让用户限时重选
                                         error_led <= 1;
-                                        // 【修改】无论当前是否已经在倒计时，只要输错，就强制重置时间为30秒
+                                        // 无论当前是否已经在倒计时，只要输错，就强制重置时间为30秒
                                         // 去掉了 if (!countdown_active) 的判断
                                         countdown_sec <= countdown_cfg;   // 重置秒数
                                         countdown_val <= countdown_cfg;   // 【关键】同步更新显示值，让用户立刻看到变回30
@@ -1769,8 +1755,6 @@ module fsm_full (
                                 end
                                 
                                 S_OP_COUNTDOWN: begin
-                                    // 该状态已废弃，逻辑已移至 MAIN_DISPLAY 的全局倒计时中
-                                    // 为了安全，如果意外进入此状态，直接跳回开始
                                     sub_state <= S_OP_SEL_DIM_M;
                                 end
                                 
@@ -1796,7 +1780,7 @@ module fsm_full (
                                     led_status <= 2'b01; 
                                     countdown_active <= 0;
                                     
-                                    // 【修改逻辑】支持按确认键(btn_start)继续当前运算
+                                    // 支持按确认键(btn_start)继续当前运算
                                     if (btn_start) begin
                                         // 1. 重置所有运算相关的标志位
                                         selecting_second <= 0; 
@@ -1805,10 +1789,10 @@ module fsm_full (
                                         op_listed_once   <= 0; 
                                         error_led        <= 0; 
                                         
-                                        // 2. 【关键修改】重置发送阶段计数器
+                                        // 2. 重置发送阶段计数器
                                         send_phase <= 0; 
 
-                                        // 3. 【关键修改】跳转回 "展示矩阵概览" 状态
+                                        // 3. 跳转回 "展示矩阵概览" 状态
                                         // 这样流程就是：概览 -> 选维度 -> 选矩阵 -> 计算
                                         sub_state <= S_OP_SHOW_INFO;
                                     end

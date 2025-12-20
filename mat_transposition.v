@@ -21,7 +21,7 @@ module mat_transposition_v4 #(
 
     localparam S_IDLE       = 3'd0;
     localparam S_CHECK      = 3'd1;
-    localparam S_PRE        = 3'd2; // 新增 PRE
+    localparam S_PRE        = 3'd2; // PRE
     localparam S_WAIT       = 3'd3; // Stream/Wait
     localparam S_DONE       = 3'd4;
     localparam S_ERROR      = 3'd5;

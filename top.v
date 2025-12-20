@@ -1,5 +1,3 @@
-// 顶层模块 - 矩阵计算器完整版
-// 支持：矩阵输入/生成/展示/运算
 module top (
     input  wire clk,          // 100MHz System Clock
     input  wire rst_n_in,     // S4 (U4) 复位按键
@@ -232,15 +230,15 @@ module top (
                                 matmul_res_valid ? matmul_row_end :
                                 conv_row_end;
 
-    // 【修改 1】扩大 FIFO 深度到 128，防止 8x10 矩阵结果溢出 (80 > 64)
-    // 【修改 5】强制使用寄存器 (Registers) 以确保绝对零延迟读取，彻底消除BRAM/LUTRAM潜在时序问题
+    // 扩大 FIFO 深度到 128，防止 8x10 矩阵结果溢出 (80 > 64)
+    // 强制使用寄存器 (Registers) 以确保绝对零延迟读取，彻底消除BRAM/LUTRAM潜在时序问题
     (* ram_style = "registers" *) reg [15:0] res_fifo [0:127];          
     (* ram_style = "registers" *) reg        res_row_end_fifo [0:127];  
     
-    // 【修改 2】增加指针位宽 (2^7 = 128)
+    // 增加指针位宽 (2^7 = 128)
     reg [6:0]  res_wr_ptr, res_rd_ptr;   
     
-    // 【修改 3】增加计数器位宽 (需能存下 128)
+    // 增加计数器位宽 (需能存下 128)
     reg [7:0]  res_count;                
     
     wire       res_fifo_empty = (res_count == 0);
@@ -278,7 +276,7 @@ module top (
             res_count    <= 0;
         end else begin
             // 结果缓冲队列的写入（独立处理）- 同时保存元素和行末标志
-            // 【修改 4】将上限判断从 64 改为 128
+            // 将上限判断从 64 改为 128
             if (calc_res_valid && res_count < 128) begin
                 res_fifo[res_wr_ptr] <= calc_res_elem;
                 res_row_end_fifo[res_wr_ptr] <= calc_row_end;
