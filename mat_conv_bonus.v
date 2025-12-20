@@ -137,6 +137,7 @@ module mat_conv_bonus #(
                             accum_count <= 0;
                             k_ptr_issue <= 0;
                             addr_valid  <= 1; // Enable read for k=0 immediately
+                            addr_valid_q <= 1; // Pre-load valid_q to catch k=0 data in first CALC cycle
                             busy        <= 1;
                             state       <= ST_CALC;
                         end
@@ -208,6 +209,7 @@ module mat_conv_bonus #(
                         acc         <= 0;
                         accum_count <= 0;
                         k_ptr_issue <= 0;
+                        addr_valid_q <= 1; // Pre-load valid_q
                         addr_valid  <= 1; // Enable read for k=0 of next pixel
                         state       <= ST_CALC;
                     end
