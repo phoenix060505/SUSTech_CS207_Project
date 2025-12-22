@@ -1110,7 +1110,6 @@ module fsm_full (
                                                 tx_data_valid <= 1;
                                                 send_phase <= 0;
                                                 sub_state <= S_OP_SEL_DIM_M;
-                                                selecting_second <= 0;
                                             end
                                         endcase
                                     end
@@ -1337,7 +1336,7 @@ module fsm_full (
                                                 
                                                 if (op_mode == 2'b01) next_sub_state <= S_OP_CHECK;      // 转置 -> 检查
                                                 else if (op_mode == 2'b10) next_sub_state <= S_OP_GET_SCALAR; // 标量 -> 输标量
-                                                else if (op_mode == 2'b11) next_sub_state <= S_OP_SEL_DIM_M;  // 乘法 -> 选B维度
+                                                else if (op_mode == 2'b11) next_sub_state <= S_OP_SHOW_INFO;  // 乘法 -> 显示信息
                                                 
                                                 // 加法模式(00)，直接去选B (S_OP_SEL_MAT)，不要再展示冗余列表
                                                 else next_sub_state <= S_OP_SEL_MAT; 
@@ -1761,7 +1760,8 @@ module fsm_full (
                                         op_listed_once <= 0;
                                         
                                         // 直接跳回维度选择，而不是去 S_OP_COUNTDOWN
-                                        sub_state <= S_OP_SEL_DIM_M; 
+                                        sub_state <= S_OP_SHOW_INFO;
+                                        send_phase <= 0;
                                     end
                                 end
                                 
