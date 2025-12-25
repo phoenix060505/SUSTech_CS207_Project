@@ -152,6 +152,9 @@ module fsm_full (
     localparam S_ECHO_SCALAR   = 6'd38; // 回显标量值
     localparam S_PREP_PRINT_B  = 6'd39; // 准备打印 B 矩阵
     localparam S_IN_ERROR_SKIP = 6'd40; // 输入错误跳过状态
+    localparam S_IN_CFG_PROMPT  = 6'd41; // 输出 "input"
+    localparam S_IN_CFG_WAIT    = 6'd42; // 等待用户输入新倒计时
+    localparam S_IN_CFG_RESULT  = 6'd43; // 输出 success/invalid
     // =========================================================
     // 寄存器定义
     // =========================================================
@@ -200,6 +203,11 @@ module fsm_full (
     reg [7:0]  rand_retry_cnt;   // 随机重试计数器
     reg [3:0]  echo_m, echo_n;   // 待回显矩阵的维度
     reg        echo_slot;        // 待回显矩阵的槽位
+    // 配置输入解析寄存器
+    reg [3:0]  cfg_digit0;
+    reg        cfg_digit0_valid;
+    reg [4:0]  cfg_value;       // 0~31 足够覆盖 15
+    reg        cfg_ok;          // 结果：是否在 5~15
     // check临时变量
     reg check_pass;
     // 主状态输出
@@ -256,7 +264,7 @@ module fsm_full (
             error_led <= 0;
             countdown_val <= 0;
             countdown_active <= 0;
-            countdown_cfg <= 5'd30;
+            countdown_cfg <= 5'd10;   // 默认 10 秒
             countdown_timer <= 0;
             countdown_sec <= 0;
             input_timeout_timer <= 0;
@@ -286,6 +294,10 @@ module fsm_full (
             digit_buffer_valid <= 0;
             rand_retry_cnt <= 0;
             echo_m <= 0; echo_n <= 0; echo_slot <= 0;
+            cfg_digit0 <= 0;
+            cfg_digit0_valid <= 0;
+            cfg_value <= 0;
+            cfg_ok <= 0;
         end else begin
             // 脉冲信号复位
             store_wen <= 0;
@@ -364,8 +376,15 @@ module fsm_full (
                             S_IN_GET_M: begin
                                 error_led <= 0;
                                 if (uart_rx_done) begin
+                                    // 检测 'C'/'c' 进入配置模式
+                                    if (uart_rx_data == "C" || uart_rx_data == "c") begin
+                                        // 进入配置模式
+                                        send_phase <= 0;
+                                        cfg_digit0_valid <= 0;
+                                        sub_state <= S_IN_CFG_PROMPT;
+                                    end
                                     // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
-                                    if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
+                                    else if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_m <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_GET_N;
                                     end else if (uart_rx_data == 8'h20) begin
@@ -380,8 +399,15 @@ module fsm_full (
                             
                             S_IN_GET_N: begin
                                 if (uart_rx_done) begin
+                                    // 检测 'C'/'c' 进入配置模式
+                                    if (uart_rx_data == "C" || uart_rx_data == "c") begin
+                                        // 进入配置模式
+                                        send_phase <= 0;
+                                        cfg_digit0_valid <= 0;
+                                        sub_state <= S_IN_CFG_PROMPT;
+                                    end
                                     // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
-                                    if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
+                                    else if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_n <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_SET_DIM;  // 先设置维度
                                         error_led <= 0;  // 输入正确，LED熄灭
@@ -559,6 +585,119 @@ module fsm_full (
                                     else begin
                                         error_led <= 0;
                                         sub_state <= S_IN_GET_M;
+                                    end
+                                end
+                            end
+                            
+                            // =============================================
+                            // 配置模式子状态
+                            // =============================================
+                            S_IN_CFG_PROMPT: begin
+                                if (!tx_busy) begin
+                                    case (send_phase)
+                                        0: begin tx_data <= "i"; tx_data_valid <= 1; send_phase <= 1; end
+                                        1: begin tx_data <= "n"; tx_data_valid <= 1; send_phase <= 2; end
+                                        2: begin tx_data <= "p"; tx_data_valid <= 1; send_phase <= 3; end
+                                        3: begin tx_data <= "u"; tx_data_valid <= 1; send_phase <= 4; end
+                                        4: begin tx_data <= "t"; tx_data_valid <= 1; send_phase <= 5; end
+                                        // 加 CRLF，更像命令行交互
+                                        5: begin tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 6; end
+                                        6: begin tx_data <= 8'h0A; tx_data_valid <= 1; send_phase <= 0; 
+                                                 sub_state <= S_IN_CFG_WAIT;
+                                                 cfg_digit0_valid <= 0;
+                                           end
+                                    endcase
+                                end
+                            end
+                            
+                            S_IN_CFG_WAIT: begin
+                                if (uart_rx_done) begin
+                                    // 数字
+                                    if (uart_rx_data >= "0" && uart_rx_data <= "9") begin
+                                        if (!cfg_digit0_valid) begin
+                                            cfg_digit0 <= uart_rx_data - "0";
+                                            cfg_digit0_valid <= 1;
+                                        end else begin
+                                            // 两位数形成：cfg_digit0*10 + new_digit
+                                            cfg_value <= (cfg_digit0 * 10) + (uart_rx_data - "0"); // 结果 <= 99
+                                            cfg_digit0_valid <= 0;  // 清缓冲
+                                            // 两位数到手直接判定
+                                            if (((cfg_digit0 * 10) + (uart_rx_data - "0")) >= 5 &&
+                                                ((cfg_digit0 * 10) + (uart_rx_data - "0")) <= 15) begin
+                                                countdown_cfg <= (cfg_digit0 * 10) + (uart_rx_data - "0");
+                                                cfg_ok <= 1;
+                                            end else begin
+                                                cfg_ok <= 0;
+                                            end
+                                            send_phase <= 0;
+                                            sub_state <= S_IN_CFG_RESULT;
+                                        end
+                                    end
+                                    // 分隔符：用于结束"单数字"
+                                    else if (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
+                                        if (cfg_digit0_valid) begin
+                                            cfg_value <= cfg_digit0; // 单位数
+                                            cfg_digit0_valid <= 0;
+                                            if (cfg_digit0 >= 5 && cfg_digit0 <= 9) begin
+                                                countdown_cfg <= cfg_digit0;
+                                                cfg_ok <= 1;
+                                            end else begin
+                                                cfg_ok <= 0;
+                                            end
+                                            send_phase <= 0;
+                                            sub_state <= S_IN_CFG_RESULT;
+                                        end
+                                        // 如果还没输入任何数字就打分隔符：忽略
+                                    end
+                                    // 其它字符：直接 invalid
+                                    else begin
+                                        cfg_digit0_valid <= 0;
+                                        cfg_ok <= 0;
+                                        send_phase <= 0;
+                                        sub_state <= S_IN_CFG_RESULT;
+                                    end
+                                end
+                            end
+                            
+                            S_IN_CFG_RESULT: begin
+                                if (!tx_busy) begin
+                                    if (cfg_ok) begin
+                                        // 输出 "success"
+                                        case (send_phase)
+                                            0: begin tx_data <= "s"; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= "u"; tx_data_valid <= 1; send_phase <= 2; end
+                                            2: begin tx_data <= "c"; tx_data_valid <= 1; send_phase <= 3; end
+                                            3: begin tx_data <= "c"; tx_data_valid <= 1; send_phase <= 4; end
+                                            4: begin tx_data <= "e"; tx_data_valid <= 1; send_phase <= 5; end
+                                            5: begin tx_data <= "s"; tx_data_valid <= 1; send_phase <= 6; end
+                                            6: begin tx_data <= "s"; tx_data_valid <= 1; send_phase <= 7; end
+                                            7: begin
+                                                tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 8;
+                                               end
+                                            8: begin
+                                                tx_data <= 8'h0A; tx_data_valid <= 1; 
+                                                send_phase <= 0;
+                                                // 可选：如果当前正在倒计时，是否立刻用新 cfg 重装？
+                                                // 建议：不打断正在跑的倒计时，只影响下一次错误倒计时
+                                                sub_state <= S_IN_GET_M;
+                                               end
+                                        endcase
+                                    end else begin
+                                        // 输出 "invalid"
+                                        case (send_phase)
+                                            0: begin tx_data <= "i"; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= "n"; tx_data_valid <= 1; send_phase <= 2; end
+                                            2: begin tx_data <= "v"; tx_data_valid <= 1; send_phase <= 3; end
+                                            3: begin tx_data <= "a"; tx_data_valid <= 1; send_phase <= 4; end
+                                            4: begin tx_data <= "l"; tx_data_valid <= 1; send_phase <= 5; end
+                                            5: begin tx_data <= "i"; tx_data_valid <= 1; send_phase <= 6; end
+                                            6: begin tx_data <= "d"; tx_data_valid <= 1; send_phase <= 7; end
+                                            7: begin tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 8; end
+                                            8: begin tx_data <= 8'h0A; tx_data_valid <= 1;
+                                                     send_phase <= 0;
+                                                     sub_state <= S_IN_GET_M;
+                                               end
+                                        endcase
                                     end
                                 end
                             end
