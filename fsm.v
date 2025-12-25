@@ -152,7 +152,6 @@ module fsm_full (
     localparam S_ECHO_SCALAR   = 6'd38; // 回显标量值
     localparam S_PREP_PRINT_B  = 6'd39; // 准备打印 B 矩阵
     localparam S_IN_ERROR_SKIP = 6'd40; // 输入错误跳过状态
-    localparam S_GEN_ERROR_SKIP = 6'd41; // 生成错误跳过状态
     // =========================================================
     // 寄存器定义
     // =========================================================
@@ -363,12 +362,12 @@ module fsm_full (
                         
                         case (sub_state)
                             S_IN_GET_M: begin
+                                error_led <= 0;
                                 if (uart_rx_done) begin
                                     // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
                                     if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_m <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_GET_N;
-                                        error_led <= 0;
                                     end else if (uart_rx_data == 8'h20) begin
                                         // 忽略维度输入中的空格
                                     end else begin
@@ -430,7 +429,7 @@ module fsm_full (
                                 // 1. 全局计时器逻辑：无数据接收时一直计数，有数据则清零
                                 // --------------------------------------------------------
                                 if (uart_rx_done) begin
-                                    input_timeout_timer <= 0; // 收到数据，重置“发呆”计时器
+                                    input_timeout_timer <= 0; // 收到数据，重置"发呆"计时器
                                 end else begin
                                     // 防止溢出
                                     if (input_timeout_timer < 32'd300_000_000) 
@@ -574,16 +573,28 @@ module fsm_full (
                         
                         case (sub_state)
                             S_GEN_GET_M: begin
+                                error_led <= 0;
                                 if (uart_rx_done) begin
                                     // 接受ASCII '1'-'5' (0x31-0x35)
                                     if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_m <= uart_rx_data - 8'h30;
                                         sub_state <= S_GEN_GET_N;
-                                        error_led <= 0;
                                     end else begin
                                         error_led <= 1;
                                         input_timeout_timer <= 0;
-                                        sub_state <= S_GEN_ERROR_SKIP;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入
+                                            sub_state <= S_GEN_GET_M;
+                                        end
                                     end
                                 end
                             end
@@ -598,7 +609,19 @@ module fsm_full (
                                     end else begin
                                         error_led <= 1;
                                         input_timeout_timer <= 0;
-                                        sub_state <= S_GEN_ERROR_SKIP;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入
+                                            sub_state <= S_GEN_GET_M;
+                                        end
                                     end
                                 end
                             end
@@ -614,7 +637,19 @@ module fsm_full (
                                     end else begin
                                         error_led <= 1;  // 违规操作，LED亮起
                                         input_timeout_timer <= 0;
-                                        sub_state <= S_GEN_ERROR_SKIP;
+                                        input_timeout_active <= 1;
+                                    end
+                                end else if (input_timeout_active) begin
+                                    // 超时计数器递增
+                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    end else begin
+                                        // 超时发生，检查是否有错误
+                                        input_timeout_active <= 0;
+                                        if (error_led) begin
+                                            // 有错误，重新开始输入，LED保持亮起
+                                            sub_state <= S_GEN_GET_M;
+                                        end
                                     end
                                 end
                             end
@@ -674,20 +709,6 @@ module fsm_full (
                                     input_timeout_active <= 0;
                                     led_status <= 2'b10; // 切回生成模式状态灯
                                     sub_state <= S_GEN_GET_M; // 跳回获取维度 m 的状态
-                                end
-                            end
-
-                            S_GEN_ERROR_SKIP: begin
-                                error_led <= 1;
-                                if (uart_rx_done) begin
-                                    input_timeout_timer <= 0;
-                                end else begin
-                                    if (input_timeout_timer < 32'd100_000_000)
-                                        input_timeout_timer <= input_timeout_timer + 1;
-                                    else begin
-                                        error_led <= 0;
-                                        sub_state <= S_GEN_GET_M;
-                                    end
                                 end
                             end
                         endcase
@@ -1081,7 +1102,6 @@ module fsm_full (
                                                 tx_data_valid <= 1;
                                                 send_phase <= 0;
                                                 sub_state <= S_OP_SEL_DIM_M;
-                                                selecting_second <= 0;
                                             end
                                         endcase
                                     end
@@ -1308,7 +1328,7 @@ module fsm_full (
                                                 
                                                 if (op_mode == 2'b01) next_sub_state <= S_OP_CHECK;      // 转置 -> 检查
                                                 else if (op_mode == 2'b10) next_sub_state <= S_OP_GET_SCALAR; // 标量 -> 输标量
-                                                else if (op_mode == 2'b11) next_sub_state <= S_OP_SEL_DIM_M;  // 乘法 -> 选B维度
+                                                else if (op_mode == 2'b11) next_sub_state <= S_OP_SHOW_INFO;  // 乘法 -> 显示信息
                                                 
                                                 // 加法模式(00)，直接去选B (S_OP_SEL_MAT)，不要再展示冗余列表
                                                 else next_sub_state <= S_OP_SEL_MAT; 
@@ -1347,7 +1367,7 @@ module fsm_full (
                                     rand_enable <= 1;
                                     // 全局超时保护：找不到匹配矩阵，放弃并返回维度选择
                                     if (rand_retry_cnt > 200) begin
-                                        error_led <= 1;   // 亮红灯，表示“刚才那次自动搜索失败了”
+                                        error_led <= 1;   // 亮红灯，表示"刚才那次自动搜索失败了"
     
                                         // 概览页面打印完总数后，会自动跳去 S_OP_SEL_DIM_M 让用户输入
                                         sub_state <= S_OP_SHOW_INFO; 
@@ -1732,7 +1752,8 @@ module fsm_full (
                                         op_listed_once <= 0;
                                         
                                         // 直接跳回维度选择，而不是去 S_OP_COUNTDOWN
-                                        sub_state <= S_OP_SEL_DIM_M; 
+                                        sub_state <= S_OP_SHOW_INFO;
+                                        send_phase <= 0;
                                     end
                                 end
                                 
