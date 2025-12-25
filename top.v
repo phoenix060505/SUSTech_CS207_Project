@@ -52,6 +52,7 @@ module top (
     wire [3:0]  stor_m, stor_n;
     wire [7:0]  stor_elem_in;
     wire        stor_elem_valid;
+    wire        stor_abort;
     wire        stor_input_done;
     
     // 存储查询接口（给定维度，查询有多少匹配的矩阵）
@@ -457,6 +458,7 @@ module top (
         .store_n(stor_n),
         .store_elem_in(stor_elem_in),
         .store_elem_valid(stor_elem_valid),
+        .store_abort(stor_abort),
         .storage_input_done(stor_input_done),
         
         // 存储查询接口
@@ -528,6 +530,7 @@ module top (
         .n(stor_n),
         .elem_in(stor_elem_in),
         .elem_valid(stor_elem_valid),
+        .store_abort(stor_abort),
         .input_done(stor_input_done),
         // 读接口（带维度）
         .rd_en(mux_rd_en),

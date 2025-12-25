@@ -20,6 +20,7 @@ module fsm_full (
     output reg  [3:0]  store_n,
     output reg  [7:0]  store_elem_in,
     output reg         store_elem_valid,
+    output reg         store_abort,
     input  wire        storage_input_done,
     
     // 存储查询接口 - 查询指定维度下有多少矩阵
@@ -203,6 +204,8 @@ module fsm_full (
     reg [7:0]  rand_retry_cnt;   // 随机重试计数器
     reg [3:0]  echo_m, echo_n;   // 待回显矩阵的维度
     reg        echo_slot;        // 待回显矩阵的槽位
+    // 输入会话状态
+    reg        in_aborted;      // 输入会话是否已中止
     // 配置输入解析寄存器
     reg [3:0]  cfg_digit0;
     reg        cfg_digit0_valid;
@@ -294,6 +297,7 @@ module fsm_full (
             digit_buffer_valid <= 0;
             rand_retry_cnt <= 0;
             echo_m <= 0; echo_n <= 0; echo_slot <= 0;
+            in_aborted <= 0;
             cfg_digit0 <= 0;
             cfg_digit0_valid <= 0;
             cfg_value <= 0;
@@ -309,6 +313,11 @@ module fsm_full (
             matmul_start <= 0;
             rand_enable <= 0;
             disp_rd_en <= 0;
+            
+            // Reset store_abort when starting a new storage operation
+            if (sub_state == S_IN_START_STORE && !error_led) begin
+                store_abort <= 0;
+            end
             
             // 返回按钮处理
             if (btn_back && main_state != MAIN_MENU) begin
@@ -446,6 +455,9 @@ module fsm_full (
                                 end else begin
                                     // 无错误，发送wen脉冲并继续
                                     store_wen <= 1;
+                                    in_aborted <= 0;           // 开始新的输入会话
+                                    store_abort <= 0;          // 清除abort信号
+                                    digit_buffer_valid <= 0;   // 清除数字缓冲区
                                     sub_state <= S_IN_RX_DATA;
                                 end
                             end
@@ -477,12 +489,19 @@ module fsm_full (
                                             temp_elem <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
                                             // 合法性检查与存储
                                             if (((digit_buffer * 10) + (uart_rx_data - 8'h30)) <= 9) begin 
-                                                store_elem_in <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
-                                                store_elem_valid <= 1;
-                                                elem_count <= elem_count + 1;
-                                                error_led <= 0;
+                                                if (!in_aborted) begin  // 只有未中止时才存储
+                                                    store_elem_in <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
+                                                    store_elem_valid <= 1;
+                                                    elem_count <= elem_count + 1;
+                                                    error_led <= 0;
+                                                end
                                             end else begin
-                                                error_led <= 1; // 越界报错
+                                                // 检测到越界元素，触发abort
+                                                if (!in_aborted) begin
+                                                    in_aborted <= 1;
+                                                    error_led <= 1;
+                                                    store_abort <= 1;  // 发送abort信号
+                                                end
                                             end
                                             digit_buffer_valid <= 0; // 清空缓冲区
                                         end
@@ -490,7 +509,7 @@ module fsm_full (
                                     // --- B. 分隔符处理 (空格/回车/换行) ---
                                     else if (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
                                         // 遇到分隔符，如果缓冲区有数字，先把它存进去
-                                        if (digit_buffer_valid && elem_count < total_elems) begin
+                                        if (digit_buffer_valid && elem_count < total_elems && !in_aborted) begin
                                             store_elem_in <= digit_buffer;
                                             store_elem_valid <= 1;
                                             elem_count <= elem_count + 1;
@@ -500,7 +519,11 @@ module fsm_full (
                                     end
                                     // --- C. 非法字符 ---
                                     else begin
-                                        error_led <= 1;
+                                        if (!in_aborted) begin
+                                            in_aborted <= 1;
+                                            error_led <= 1;
+                                            store_abort <= 1;  // 发送abort信号
+                                        end
                                     end
                                 end
 
@@ -521,7 +544,7 @@ module fsm_full (
                                     input_timeout_timer <= 0;
                                     
                                     // 1. 如果缓冲区里还有个落单的数字，先存进去
-                                    if (digit_buffer_valid && elem_count < total_elems) begin
+                                    if (digit_buffer_valid && elem_count < total_elems && !in_aborted) begin
                                         store_elem_in <= digit_buffer;
                                         store_elem_valid <= 1;
                                         elem_count <= elem_count + 1;
@@ -529,12 +552,13 @@ module fsm_full (
                                     end
                                     
                                     // 2. 状态跳转
-                                    // 注意：这里利用下一时钟周期的状态判断，
-                                    // 如果上面的 store_elem_valid 导致 elem_count 满了，
-                                    // 下面的状态跳转会在下下个周期被 S_IN_DONE 捕获（或者在这里直接预判）
-                                    
-                                    // 为简化逻辑，直接跳到补零状态，由 S_IN_FILL_ZEROS 里的逻辑判断是否真的需要补
-                                    sub_state <= S_IN_FILL_ZEROS;
+                                    // 如果输入已中止，直接跳到错误处理状态
+                                    if (in_aborted) begin
+                                        sub_state <= S_IN_ERROR_SKIP;
+                                    end else begin
+                                        // 为简化逻辑，直接跳到补零状态，由 S_IN_FILL_ZEROS 里的逻辑判断是否真的需要补
+                                        sub_state <= S_IN_FILL_ZEROS;
+                                    end
                                 end
                                 
                                 // --------------------------------------------------------
@@ -548,12 +572,20 @@ module fsm_full (
                             S_IN_FILL_ZEROS: begin
                                 // 数据不足时自动补0
                                 if (elem_count < total_elems) begin
-                                    store_elem_in <= 8'h0;  // 发送0值
-                                    store_elem_valid <= 1;
-                                    elem_count <= elem_count + 1;
+                                    // 检查是否已中止，如果已中止则跳过补零过程
+                                    if (in_aborted) begin
+                                        sub_state <= S_IN_ERROR_SKIP;
+                                    end else begin
+                                        store_elem_in <= 8'h0;  // 发送0值
+                                        store_elem_valid <= 1;
+                                        elem_count <= elem_count + 1;
+                                    end
                                 end else begin
                                     // 补0完成，等待存储模块完成
-                                    if (storage_input_done) begin
+                                    // 但如果已中止，则直接跳过到错误处理
+                                    if (in_aborted) begin
+                                        sub_state <= S_IN_ERROR_SKIP;
+                                    end else if (storage_input_done) begin
                                         current_mat_idx <= current_mat_idx + 1;
                                         sub_state <= S_IN_DONE;
                                     end

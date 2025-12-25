@@ -17,6 +17,7 @@ module matrix_storage #(
     input  wire [3:0]               n,          // 写入矩阵的列数 (1~5)
     input  wire [ELEM_WIDTH-1:0]    elem_in,    // 写入的矩阵元素数据
     input  wire                     elem_valid, // 元素数据有效信号
+    input  wire                     store_abort, // 存储中止信号
     output reg                      input_done, // 矩阵写入完成标志
     
     // 读取接口
@@ -121,6 +122,15 @@ module matrix_storage #(
                     // 重要：不要用for循环清空matrix_mem！
                     // 直接覆盖旧数据即可，dim_slot_valid会保证读取安全。
                 end
+            end
+            
+            // 处理存储中止信号：当收到中止信号时，将当前槽位标记为无效
+            if (active_valid && store_abort) begin
+                // 将当前激活的槽位标记为无效
+                // 计算当前激活槽位对应的槽位索引 (0 或 1)
+                // active_slot = wen_dim_combo * 2 + slot_index，所以 slot_index = active_slot[0]
+                dim_slot_valid[wen_dim_combo][active_slot[0]] <= 1'b0;
+                active_valid <= 1'b0;    // 结束写入会话
             end
             
             // 数据写入操作
