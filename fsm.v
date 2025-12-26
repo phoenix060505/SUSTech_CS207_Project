@@ -20,6 +20,7 @@ module fsm_full (
     output reg  [3:0]  store_n,
     output reg  [7:0]  store_elem_in,
     output reg         store_elem_valid,
+    output reg         store_abort,
     input  wire        storage_input_done,
     
     // 存储查询接口 - 查询指定维度下有多少矩阵
@@ -151,6 +152,10 @@ module fsm_full (
     localparam S_ECHO_PRINT    = 6'd37; // 执行回显打印
     localparam S_ECHO_SCALAR   = 6'd38; // 回显标量值
     localparam S_PREP_PRINT_B  = 6'd39; // 准备打印 B 矩阵
+    localparam S_IN_ERROR_SKIP = 6'd40; // 输入错误跳过状态
+    localparam S_IN_CFG_PROMPT  = 6'd41; // 输出 "input"
+    localparam S_IN_CFG_WAIT    = 6'd42; // 等待用户输入新倒计时
+    localparam S_IN_CFG_RESULT  = 6'd43; // 输出 success/invalid
     // =========================================================
     // 寄存器定义
     // =========================================================
@@ -199,6 +204,13 @@ module fsm_full (
     reg [7:0]  rand_retry_cnt;   // 随机重试计数器
     reg [3:0]  echo_m, echo_n;   // 待回显矩阵的维度
     reg        echo_slot;        // 待回显矩阵的槽位
+    // 输入会话状态
+    reg        in_aborted;      // 输入会话是否已中止
+    // 配置输入解析寄存器
+    reg [3:0]  cfg_digit0;
+    reg        cfg_digit0_valid;
+    reg [4:0]  cfg_value;       // 0~31 足够覆盖 15
+    reg        cfg_ok;          // 结果：是否在 5~15
     // check临时变量
     reg check_pass;
     // 主状态输出
@@ -255,7 +267,7 @@ module fsm_full (
             error_led <= 0;
             countdown_val <= 0;
             countdown_active <= 0;
-            countdown_cfg <= 5'd30;
+            countdown_cfg <= 5'd10;   // 默认 10 秒
             countdown_timer <= 0;
             countdown_sec <= 0;
             input_timeout_timer <= 0;
@@ -285,6 +297,11 @@ module fsm_full (
             digit_buffer_valid <= 0;
             rand_retry_cnt <= 0;
             echo_m <= 0; echo_n <= 0; echo_slot <= 0;
+            in_aborted <= 0;
+            cfg_digit0 <= 0;
+            cfg_digit0_valid <= 0;
+            cfg_value <= 0;
+            cfg_ok <= 0;
         end else begin
             // 脉冲信号复位
             store_wen <= 0;
@@ -296,6 +313,11 @@ module fsm_full (
             matmul_start <= 0;
             rand_enable <= 0;
             disp_rd_en <= 0;
+            
+            // Reset store_abort when starting a new storage operation
+            if (sub_state == S_IN_START_STORE && !error_led) begin
+                store_abort <= 0;
+            end
             
             // 返回按钮处理
             if (btn_back && main_state != MAIN_MENU) begin
@@ -363,8 +385,15 @@ module fsm_full (
                             S_IN_GET_M: begin
                                 error_led <= 0;
                                 if (uart_rx_done) begin
+                                    // 检测 'C'/'c' 进入配置模式
+                                    if (uart_rx_data == "C" || uart_rx_data == "c") begin
+                                        // 进入配置模式
+                                        send_phase <= 0;
+                                        cfg_digit0_valid <= 0;
+                                        sub_state <= S_IN_CFG_PROMPT;
+                                    end
                                     // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
-                                    if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
+                                    else if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_m <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_GET_N;
                                     end else if (uart_rx_data == 8'h20) begin
@@ -372,27 +401,22 @@ module fsm_full (
                                     end else begin
                                         error_led <= 1;  // 违规操作，LED开始亮起
                                         input_timeout_timer <= 0;
-                                        input_timeout_active <= 1;
-                                    end
-                                end else if (input_timeout_active) begin
-                                    // 超时计数器递增
-                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
-                                        input_timeout_timer <= input_timeout_timer + 1;
-                                    end else begin
-                                        // 超时发生，检查是否有错误
-                                        input_timeout_active <= 0;
-                                        if (error_led) begin
-                                            // 有错误，重新开始输入，LED保持亮起
-                                            sub_state <= S_IN_GET_M;
-                                        end
+                                        sub_state <= S_IN_ERROR_SKIP;
                                     end
                                 end
                             end
                             
                             S_IN_GET_N: begin
                                 if (uart_rx_done) begin
+                                    // 检测 'C'/'c' 进入配置模式
+                                    if (uart_rx_data == "C" || uart_rx_data == "c") begin
+                                        // 进入配置模式
+                                        send_phase <= 0;
+                                        cfg_digit0_valid <= 0;
+                                        sub_state <= S_IN_CFG_PROMPT;
+                                    end
                                     // 接受ASCII '1'-'5' (0x31-0x35) 或空格 (0x20)
-                                    if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
+                                    else if (uart_rx_data >= 8'h31 && uart_rx_data <= 8'h35) begin
                                         temp_n <= uart_rx_data - 8'h30;
                                         sub_state <= S_IN_SET_DIM;  // 先设置维度
                                         error_led <= 0;  // 输入正确，LED熄灭
@@ -401,19 +425,7 @@ module fsm_full (
                                     end else begin
                                         error_led <= 1;  // 违规操作，LED亮起
                                         input_timeout_timer <= 0;
-                                        input_timeout_active <= 1;
-                                    end
-                                end else if (input_timeout_active) begin
-                                    // 超时计数器递增
-                                    if (input_timeout_timer < 26'd5000000) begin  // 50ms超时 (100MHz时钟)
-                                        input_timeout_timer <= input_timeout_timer + 1;
-                                    end else begin
-                                        // 超时发生，检查是否有错误
-                                        input_timeout_active <= 0;
-                                        if (error_led) begin
-                                            // 有错误，重新开始输入，LED保持亮起
-                                            sub_state <= S_IN_GET_M;
-                                        end
+                                        sub_state <= S_IN_ERROR_SKIP;
                                     end
                                 end
                             end
@@ -443,6 +455,9 @@ module fsm_full (
                                 end else begin
                                     // 无错误，发送wen脉冲并继续
                                     store_wen <= 1;
+                                    in_aborted <= 0;           // 开始新的输入会话
+                                    store_abort <= 0;          // 清除abort信号
+                                    digit_buffer_valid <= 0;   // 清除数字缓冲区
                                     sub_state <= S_IN_RX_DATA;
                                 end
                             end
@@ -452,7 +467,7 @@ module fsm_full (
                                 // 1. 全局计时器逻辑：无数据接收时一直计数，有数据则清零
                                 // --------------------------------------------------------
                                 if (uart_rx_done) begin
-                                    input_timeout_timer <= 0; // 收到数据，重置“发呆”计时器
+                                    input_timeout_timer <= 0; // 收到数据，重置"发呆"计时器
                                 end else begin
                                     // 防止溢出
                                     if (input_timeout_timer < 32'd300_000_000) 
@@ -474,12 +489,19 @@ module fsm_full (
                                             temp_elem <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
                                             // 合法性检查与存储
                                             if (((digit_buffer * 10) + (uart_rx_data - 8'h30)) <= 9) begin 
-                                                store_elem_in <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
-                                                store_elem_valid <= 1;
-                                                elem_count <= elem_count + 1;
-                                                error_led <= 0;
+                                                if (!in_aborted) begin  // 只有未中止时才存储
+                                                    store_elem_in <= (digit_buffer * 10) + (uart_rx_data - 8'h30);
+                                                    store_elem_valid <= 1;
+                                                    elem_count <= elem_count + 1;
+                                                    error_led <= 0;
+                                                end
                                             end else begin
-                                                error_led <= 1; // 越界报错
+                                                // 检测到越界元素，触发abort
+                                                if (!in_aborted) begin
+                                                    in_aborted <= 1;
+                                                    error_led <= 1;
+                                                    store_abort <= 1;  // 发送abort信号
+                                                end
                                             end
                                             digit_buffer_valid <= 0; // 清空缓冲区
                                         end
@@ -487,7 +509,7 @@ module fsm_full (
                                     // --- B. 分隔符处理 (空格/回车/换行) ---
                                     else if (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
                                         // 遇到分隔符，如果缓冲区有数字，先把它存进去
-                                        if (digit_buffer_valid && elem_count < total_elems) begin
+                                        if (digit_buffer_valid && elem_count < total_elems && !in_aborted) begin
                                             store_elem_in <= digit_buffer;
                                             store_elem_valid <= 1;
                                             elem_count <= elem_count + 1;
@@ -497,7 +519,11 @@ module fsm_full (
                                     end
                                     // --- C. 非法字符 ---
                                     else begin
-                                        error_led <= 1;
+                                        if (!in_aborted) begin
+                                            in_aborted <= 1;
+                                            error_led <= 1;
+                                            store_abort <= 1;  // 发送abort信号
+                                        end
                                     end
                                 end
 
@@ -518,7 +544,7 @@ module fsm_full (
                                     input_timeout_timer <= 0;
                                     
                                     // 1. 如果缓冲区里还有个落单的数字，先存进去
-                                    if (digit_buffer_valid && elem_count < total_elems) begin
+                                    if (digit_buffer_valid && elem_count < total_elems && !in_aborted) begin
                                         store_elem_in <= digit_buffer;
                                         store_elem_valid <= 1;
                                         elem_count <= elem_count + 1;
@@ -526,12 +552,13 @@ module fsm_full (
                                     end
                                     
                                     // 2. 状态跳转
-                                    // 注意：这里利用下一时钟周期的状态判断，
-                                    // 如果上面的 store_elem_valid 导致 elem_count 满了，
-                                    // 下面的状态跳转会在下下个周期被 S_IN_DONE 捕获（或者在这里直接预判）
-                                    
-                                    // 为简化逻辑，直接跳到补零状态，由 S_IN_FILL_ZEROS 里的逻辑判断是否真的需要补
-                                    sub_state <= S_IN_FILL_ZEROS;
+                                    // 如果输入已中止，直接跳到错误处理状态
+                                    if (in_aborted) begin
+                                        sub_state <= S_IN_ERROR_SKIP;
+                                    end else begin
+                                        // 为简化逻辑，直接跳到补零状态，由 S_IN_FILL_ZEROS 里的逻辑判断是否真的需要补
+                                        sub_state <= S_IN_FILL_ZEROS;
+                                    end
                                 end
                                 
                                 // --------------------------------------------------------
@@ -545,12 +572,20 @@ module fsm_full (
                             S_IN_FILL_ZEROS: begin
                                 // 数据不足时自动补0
                                 if (elem_count < total_elems) begin
-                                    store_elem_in <= 8'h0;  // 发送0值
-                                    store_elem_valid <= 1;
-                                    elem_count <= elem_count + 1;
+                                    // 检查是否已中止，如果已中止则跳过补零过程
+                                    if (in_aborted) begin
+                                        sub_state <= S_IN_ERROR_SKIP;
+                                    end else begin
+                                        store_elem_in <= 8'h0;  // 发送0值
+                                        store_elem_valid <= 1;
+                                        elem_count <= elem_count + 1;
+                                    end
                                 end else begin
                                     // 补0完成，等待存储模块完成
-                                    if (storage_input_done) begin
+                                    // 但如果已中止，则直接跳过到错误处理
+                                    if (in_aborted) begin
+                                        sub_state <= S_IN_ERROR_SKIP;
+                                    end else if (storage_input_done) begin
                                         current_mat_idx <= current_mat_idx + 1;
                                         sub_state <= S_IN_DONE;
                                     end
@@ -568,6 +603,134 @@ module fsm_full (
                                     led_status <= 2'b11;
                                     // 自动进入下一次输入，无需再次按键
                                     sub_state <= S_IN_GET_M;
+                                end
+                            end
+
+                            S_IN_ERROR_SKIP: begin
+                                error_led <= 1;
+                                if (uart_rx_done) begin
+                                    input_timeout_timer <= 0; // 收到任何数据都重置计时器
+                                end else begin
+                                    // 1秒无数据则认为该次错误输入结束
+                                    if (input_timeout_timer < 32'd100_000_000)
+                                        input_timeout_timer <= input_timeout_timer + 1;
+                                    else begin
+                                        error_led <= 0;
+                                        sub_state <= S_IN_GET_M;
+                                    end
+                                end
+                            end
+                            
+                            // =============================================
+                            // 配置模式子状态
+                            // =============================================
+                            S_IN_CFG_PROMPT: begin
+                                if (!tx_busy) begin
+                                    case (send_phase)
+                                        0: begin tx_data <= "i"; tx_data_valid <= 1; send_phase <= 1; end
+                                        1: begin tx_data <= "n"; tx_data_valid <= 1; send_phase <= 2; end
+                                        2: begin tx_data <= "p"; tx_data_valid <= 1; send_phase <= 3; end
+                                        3: begin tx_data <= "u"; tx_data_valid <= 1; send_phase <= 4; end
+                                        4: begin tx_data <= "t"; tx_data_valid <= 1; send_phase <= 5; end
+                                        // 加 CRLF，更像命令行交互
+                                        5: begin tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 6; end
+                                        6: begin tx_data <= 8'h0A; tx_data_valid <= 1; send_phase <= 0; 
+                                                 sub_state <= S_IN_CFG_WAIT;
+                                                 cfg_digit0_valid <= 0;
+                                           end
+                                    endcase
+                                end
+                            end
+                            
+                            S_IN_CFG_WAIT: begin
+                                if (uart_rx_done) begin
+                                    // 数字
+                                    if (uart_rx_data >= "0" && uart_rx_data <= "9") begin
+                                        if (!cfg_digit0_valid) begin
+                                            cfg_digit0 <= uart_rx_data - "0";
+                                            cfg_digit0_valid <= 1;
+                                        end else begin
+                                            // 两位数形成：cfg_digit0*10 + new_digit
+                                            cfg_value <= (cfg_digit0 * 10) + (uart_rx_data - "0"); // 结果 <= 99
+                                            cfg_digit0_valid <= 0;  // 清缓冲
+                                            // 两位数到手直接判定
+                                            if (((cfg_digit0 * 10) + (uart_rx_data - "0")) >= 5 &&
+                                                ((cfg_digit0 * 10) + (uart_rx_data - "0")) <= 15) begin
+                                                countdown_cfg <= (cfg_digit0 * 10) + (uart_rx_data - "0");
+                                                cfg_ok <= 1;
+                                            end else begin
+                                                cfg_ok <= 0;
+                                            end
+                                            send_phase <= 0;
+                                            sub_state <= S_IN_CFG_RESULT;
+                                        end
+                                    end
+                                    // 分隔符：用于结束"单数字"
+                                    else if (uart_rx_data == 8'h20 || uart_rx_data == 8'h0D || uart_rx_data == 8'h0A) begin
+                                        if (cfg_digit0_valid) begin
+                                            cfg_value <= cfg_digit0; // 单位数
+                                            cfg_digit0_valid <= 0;
+                                            if (cfg_digit0 >= 5 && cfg_digit0 <= 9) begin
+                                                countdown_cfg <= cfg_digit0;
+                                                cfg_ok <= 1;
+                                            end else begin
+                                                cfg_ok <= 0;
+                                            end
+                                            send_phase <= 0;
+                                            sub_state <= S_IN_CFG_RESULT;
+                                        end
+                                        // 如果还没输入任何数字就打分隔符：忽略
+                                    end
+                                    // 其它字符：直接 invalid
+                                    else begin
+                                        cfg_digit0_valid <= 0;
+                                        cfg_ok <= 0;
+                                        send_phase <= 0;
+                                        sub_state <= S_IN_CFG_RESULT;
+                                    end
+                                end
+                            end
+                            
+                            S_IN_CFG_RESULT: begin
+                                if (!tx_busy) begin
+                                    if (cfg_ok) begin
+                                        // 输出 "success"
+                                        case (send_phase)
+                                            0: begin tx_data <= "s"; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= "u"; tx_data_valid <= 1; send_phase <= 2; end
+                                            2: begin tx_data <= "c"; tx_data_valid <= 1; send_phase <= 3; end
+                                            3: begin tx_data <= "c"; tx_data_valid <= 1; send_phase <= 4; end
+                                            4: begin tx_data <= "e"; tx_data_valid <= 1; send_phase <= 5; end
+                                            5: begin tx_data <= "s"; tx_data_valid <= 1; send_phase <= 6; end
+                                            6: begin tx_data <= "s"; tx_data_valid <= 1; send_phase <= 7; end
+                                            7: begin
+                                                tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 8;
+                                               end
+                                            8: begin
+                                                tx_data <= 8'h0A; tx_data_valid <= 1; 
+                                                send_phase <= 0;
+                                                // 可选：如果当前正在倒计时，是否立刻用新 cfg 重装？
+                                                // 建议：不打断正在跑的倒计时，只影响下一次错误倒计时
+                                                sub_state <= S_IN_GET_M;
+                                               end
+                                        endcase
+                                    end else begin
+                                        // 输出 "invalid"
+                                        case (send_phase)
+                                            0: begin tx_data <= "i"; tx_data_valid <= 1; send_phase <= 1; end
+                                            1: begin tx_data <= "n"; tx_data_valid <= 1; send_phase <= 2; end
+                                            2: begin tx_data <= "v"; tx_data_valid <= 1; send_phase <= 3; end
+                                            3: begin tx_data <= "a"; tx_data_valid <= 1; send_phase <= 4; end
+                                            4: begin tx_data <= "l"; tx_data_valid <= 1; send_phase <= 5; end
+                                            5: begin tx_data <= "i"; tx_data_valid <= 1; send_phase <= 6; end
+                                            6: begin tx_data <= "d"; tx_data_valid <= 1; send_phase <= 7; end
+                                            7: begin tx_data <= 8'h0D; tx_data_valid <= 1; send_phase <= 8; end
+                                            8: begin tx_data <= 8'h0A; tx_data_valid <= 1;
+                                                     send_phase <= 0;
+                                                     sub_state <= S_IN_GET_M;
+                                               end
+                                        endcase
+                                    end
                                 end
                             end
                         endcase
@@ -1375,7 +1538,7 @@ module fsm_full (
                                     rand_enable <= 1;
                                     // 全局超时保护：找不到匹配矩阵，放弃并返回维度选择
                                     if (rand_retry_cnt > 200) begin
-                                        error_led <= 1;   // 亮红灯，表示“刚才那次自动搜索失败了”
+                                        error_led <= 1;   // 亮红灯，表示"刚才那次自动搜索失败了"
     
                                         // 概览页面打印完总数后，会自动跳去 S_OP_SEL_DIM_M 让用户输入
                                         sub_state <= S_OP_SHOW_INFO; 
